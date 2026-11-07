@@ -17,7 +17,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
     // Check user preference for reduced motion on mount
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (reducedMotion) {
-      setIsFading(true);
+      queueMicrotask(() => {
+        setIsFading(true);
+      });
       const timer = setTimeout(onComplete, 100);
       return () => clearTimeout(timer);
     }

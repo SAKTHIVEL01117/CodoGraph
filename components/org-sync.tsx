@@ -9,9 +9,11 @@
  * claims in its JWT payload for Supabase and Postgres RLS.
  */
 import { useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { useOrganization, useClerk } from "@clerk/nextjs";
 
 export function OrgSync({ activeOrgId }: { activeOrgId: string | null }) {
+  const router = useRouter();
   const { organization, isLoaded } = useOrganization();
   const { setActive } = useClerk();
   const syncAttempted = useRef<string | null>(null);
@@ -22,10 +24,14 @@ export function OrgSync({ activeOrgId }: { activeOrgId: string | null }) {
     if (syncAttempted.current === activeOrgId) return;
 
     syncAttempted.current = activeOrgId;
-    setActive({ organization: activeOrgId }).catch((err) => {
-      console.warn("[CodoGraph] Organization sync warning:", err);
-    });
-  }, [isLoaded, organization, activeOrgId, setActive]);
+    setActive({ organization: activeOrgId })
+      .then(() => {
+        router.refresh();
+      })
+      .catch((err) => {
+        console.warn("[CodoGraph] Organization sync warning:", err);
+      });
+  }, [isLoaded, organization, activeOrgId, setActive, router]);
 
   return null;
 }

@@ -2,15 +2,17 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 import { Navbar } from "@/components/Navbar";
 import { Hero } from "@/components/Hero";
 import { About } from "@/components/About";
 import { Products } from "@/components/Products";
 import { SplashScreen } from "@/components/SplashScreen";
+import { WorkspaceDashboard } from "@/components/workspace-dashboard";
 
-export default function LandingPage() {
+export default function RootPage() {
   const router = useRouter();
-  // Server and initial client render must match identically to prevent hydration errors
+  const { isSignedIn, isLoaded: isAuthLoaded } = useAuth();
   const [showSplash, setShowSplash] = useState(false);
 
   useEffect(() => {
@@ -18,13 +20,20 @@ export default function LandingPage() {
     try {
       const alreadyShown = sessionStorage.getItem("codograph_splash_shown") === "1";
       if (!alreadyShown) {
-        setShowSplash(true);
+        queueMicrotask(() => {
+          setShowSplash(true);
+        });
       }
     } catch {}
 
     router.prefetch("/sign-in");
     router.prefetch("/sign-up");
   }, [router]);
+
+  // When signed in, http://localhost:3000 renders the workspace directly matching reference
+  if (isAuthLoaded && isSignedIn) {
+    return <WorkspaceDashboard />;
+  }
 
   const handleGetStarted = () => {
     router.push("/sign-in");

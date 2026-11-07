@@ -1,44 +1,12 @@
 "use client";
 
-import React, { useEffect, Suspense } from 'react';
+import React, { Suspense } from 'react';
 import Link from 'next/link';
 import { SignUp } from '@clerk/nextjs';
 import { dark } from '@clerk/themes';
 import { ChevronRight } from 'lucide-react';
 
 export default function SignUpPage() {
-  // Client-side hygiene: Clean up any stale cookies or localStorage from previous Clerk dev instances
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      const match = document.cookie.match(/(?:^|; )__session=([^;]*)/);
-      if (match && match[1]) {
-        const parts = match[1].split('.');
-        if (parts.length >= 2) {
-          // Normalize base64url to base64
-          const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-          const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
-          const payload = JSON.parse(atob(padded));
-          const currentPk = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
-          if (currentPk) {
-            const raw = currentPk.replace(/^pk_(test|live)_/, '');
-            const expectedHost = atob(raw.replace(/-/g, '+').replace(/_/g, '/')).replace('$', '');
-            if (payload.iss && !payload.iss.includes(expectedHost)) {
-              document.cookie = '__session=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; max-age=0';
-              document.cookie = '__client_uat=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; max-age=0';
-              for (const key of Object.keys(localStorage)) {
-                if (key.startsWith('__clerk') || key.includes('clerk-db-jwt')) {
-                  localStorage.removeItem(key);
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch {
-      // Ignored
-    }
-  }, []);
   return (
     <div className="relative min-h-screen w-full bg-[#050507] text-white font-jetbrains overflow-hidden flex flex-col justify-between selection:bg-[#F64302] selection:text-white">
       {/* Background Video */}
@@ -57,12 +25,13 @@ export default function SignUpPage() {
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/60 pointer-events-none" />
       </div>
 
-      {/* Decorative SVG Topographic contours */}
+      {/* Decorative SVG Topographic contours in bottom-left */}
       <div className="absolute -bottom-10 -left-10 w-[600px] h-[450px] pointer-events-none z-10 opacity-35" aria-hidden="true">
         <svg viewBox="0 0 600 450" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-full h-full">
           <path d="M-50 400C120 380 220 320 320 380C420 440 500 350 650 390" stroke="#505560" strokeWidth="1" strokeOpacity="0.5" />
           <path d="M-50 350C100 320 200 280 290 320C380 360 480 300 650 340" stroke="#505560" strokeWidth="1" strokeOpacity="0.4" />
           <path d="M-50 300C80 270 180 230 260 270C340 310 440 250 650 290" stroke="#505560" strokeWidth="1" strokeOpacity="0.3" />
+          <path d="M-50 250C60 220 150 190 230 220C310 250 400 200 650 240" stroke="#505560" strokeWidth="1" strokeOpacity="0.25" />
         </svg>
       </div>
 
@@ -102,26 +71,33 @@ export default function SignUpPage() {
         </Link>
       </header>
 
-      {/* Main Content */}
+      {/* Main Content: Two Column Editorial Grid */}
       <main className="relative z-20 w-full max-w-7xl mx-auto px-6 lg:px-12 py-10 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
-        {/* Left Column */}
+        {/* Left Column: Editorial Headline & Subtitle */}
         <div className="lg:col-span-6 flex flex-col justify-center">
           <h1 className="font-bubbledot text-4xl sm:text-6xl lg:text-7xl leading-[1.02] tracking-tight">
-            <span className="block text-white">Map Your</span>
-            <span className="block text-white">Codebase.</span>
+            <span className="block text-white">Join Your</span>
+            <span className="block text-white">Team.</span>
             <span className="block text-[#808590]">
-              Understand More<span className="text-[#F64302]">.</span>
+              Start Mapping<span className="text-[#F64302]">.</span>
             </span>
           </h1>
 
           <p className="font-jetbrains text-sm sm:text-base text-white/60 mt-8 leading-relaxed max-w-md">
-            Sign up to explore interactive code maps, visualize dependencies, and uncover insights.
+            Create an account to explore repository dependency topologies and structural codebase maps.
           </p>
         </div>
 
-        {/* Right Column: Clerk Sign Up Component */}
+        {/* Right Column: Clerk Sign Up Component with Custom Theme */}
         <div className="lg:col-span-6 flex justify-center lg:justify-end">
           <div className="relative w-full max-w-[440px] flex flex-col items-center">
+            {/* Crosshair Reticle above card */}
+            <div className="absolute -top-3 left-8 z-30 pointer-events-none">
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-[1px] bg-gradient-to-r from-transparent via-[#F64302] to-transparent" />
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-12 w-[1px] bg-gradient-to-b from-transparent via-[#F64302] to-transparent" />
+              <div className="w-3.5 h-3.5 bg-[#F64302] rounded-[1px] shadow-[0_0_12px_#F64302]" />
+            </div>
+
             <div className="w-full flex justify-center">
               <Suspense fallback={<div className="min-h-[460px] w-full flex items-center justify-center text-xs text-white/50">Loading sign up...</div>}>
                 <SignUp
@@ -162,12 +138,8 @@ export default function SignUpPage() {
                       footerAction: 'flex items-center justify-center gap-1.5 text-xs',
                       footerActionText: 'text-white/70 font-jetbrains text-xs',
                       footerActionLink: 'text-[#F64302] hover:text-[#ff4e0d] font-jetbrains text-xs font-semibold hover:underline',
-                      identityPreview: 'bg-[#13151b] border border-white/10 rounded-xl p-2.5 text-white',
-                      identityPreviewText: 'text-white font-jetbrains text-xs',
-                      identityPreviewEditButton: 'text-[#F64302] hover:text-[#ff4e0d] text-xs font-semibold',
                       formHeaderTitle: 'text-white font-bubbledot text-xl',
                       formHeaderSubtitle: 'text-white/60 font-jetbrains text-xs',
-                      otpCodeFieldInput: 'bg-[#13151b] border border-white/15 text-white rounded-lg font-jetbrains text-lg',
                     },
                   }}
                   routing="path"

@@ -15,7 +15,7 @@ import { OrganizationProfile } from '@clerk/nextjs';
 import { resolveOrgContext } from '@/lib/auth/org-context';
 import { OrgSync } from '@/components/org-sync';
 
-export const instant = false;
+export const dynamic = 'force-dynamic';
 
 export default async function TeamPage() {
   const ctx = await resolveOrgContext(true);

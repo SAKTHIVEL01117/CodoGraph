@@ -56,6 +56,10 @@ export function createSupabaseClient(tokenProvider?: ClerkTokenProvider): Supaba
       if (typeof tokenProvider === 'function') {
         return tokenProvider();
       }
+      try {
+        const token = await tokenProvider.getToken({ template: 'supabase' });
+        if (token) return token;
+      } catch {}
       return tokenProvider.getToken();
     },
   });

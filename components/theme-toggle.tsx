@@ -1,61 +1,63 @@
 "use client";
 
-import React from "react";
-import { Sun, Moon, Laptop } from "lucide-react";
+import React, { useSyncExternalStore } from "react";
 import { useTheme } from "./theme-provider";
 
+const subscribe = () => () => {};
+
 export function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, mounted } = useTheme();
+  const isMounted = useSyncExternalStore(subscribe, () => true, () => false);
+
+  // During SSR and initial client hydration, guarantee deterministic initial state ("system")
+  const activeTheme = isMounted || mounted ? theme : "system";
 
   return (
     <div
       role="group"
       aria-label="Theme selection"
-      className="inline-flex items-center p-1 rounded-lg bg-black/5 dark:bg-white/10 border border-black/10 dark:border-white/10 text-xs font-jetbrains"
+      className="inline-flex items-center rounded border border-border/40 bg-secondary/30 p-0.5 text-[11px] font-mono"
     >
+      <button
+        type="button"
+        onClick={() => setTheme("system")}
+        aria-label="Follow system theme"
+        aria-pressed={activeTheme === "system"}
+        className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+          activeTheme === "system"
+            ? "bg-secondary text-foreground font-semibold shadow-sm"
+            : "text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        system
+      </button>
+
       <button
         type="button"
         onClick={() => setTheme("light")}
         aria-label="Force light theme"
-        aria-pressed={theme === "light"}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
-          theme === "light"
-            ? "bg-white text-black shadow-sm font-semibold"
-            : "text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white"
+        aria-pressed={activeTheme === "light"}
+        className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+          activeTheme === "light"
+            ? "bg-secondary text-foreground font-semibold shadow-sm"
+            : "text-muted-foreground hover:text-foreground"
         }`}
       >
-        <Sun className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">Light</span>
+        light
       </button>
 
       <button
         type="button"
         onClick={() => setTheme("dark")}
         aria-label="Force dark theme"
-        aria-pressed={theme === "dark"}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
-          theme === "dark"
-            ? "bg-black text-white shadow-sm font-semibold dark:bg-white/20"
-            : "text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white"
+        aria-pressed={activeTheme === "dark"}
+        className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
+          activeTheme === "dark"
+            ? "bg-secondary text-foreground font-semibold shadow-sm"
+            : "text-muted-foreground hover:text-foreground"
         }`}
       >
-        <Moon className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">Dark</span>
-      </button>
-
-      <button
-        type="button"
-        onClick={() => setTheme("system")}
-        aria-label="Follow system theme"
-        aria-pressed={theme === "system"}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all ${
-          theme === "system"
-            ? "bg-white text-black dark:bg-white/20 dark:text-white shadow-sm font-semibold"
-            : "text-black/60 dark:text-white/60 hover:text-black dark:hover:text-white"
-        }`}
-      >
-        <Laptop className="w-3.5 h-3.5" />
-        <span className="hidden sm:inline">System</span>
+        dark
       </button>
     </div>
   );

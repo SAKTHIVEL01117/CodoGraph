@@ -44,6 +44,10 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient> {
     // needs to authorize a request. The returned JWT carries sub and org claims
     // that Postgres RLS policies can read via (auth.jwt() ->> 'org_id').
     accessToken: async () => {
+      try {
+        const token = await clerkAuth.getToken({ template: 'supabase' });
+        if (token) return token;
+      } catch {}
       return clerkAuth.getToken();
     },
   });
