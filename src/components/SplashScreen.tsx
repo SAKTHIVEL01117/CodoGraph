@@ -12,17 +12,13 @@ interface Block {
 export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isFading, setIsFading] = useState(false);
-  const [reducedMotion, setReducedMotion] = useState(false);
 
   useEffect(() => {
-    const isReduced = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    setReducedMotion(isReduced);
-
-    if (isReduced) {
-      const timer = setTimeout(() => {
-        setIsFading(true);
-        setTimeout(onComplete, 200);
-      }, 50);
+    // Check user preference for reduced motion on mount
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) {
+      setIsFading(true);
+      const timer = setTimeout(onComplete, 100);
       return () => clearTimeout(timer);
     }
 
@@ -42,16 +38,24 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
     };
     window.addEventListener('resize', handleResize);
 
-    const blockSize = 10;
-    const duration = 1800; // 1800ms
-    const ring1: Block[] = Array.from({ length: 360 }, (_, i) => ({
-      angle: (2 * Math.PI * i) / 360 + (Math.random() - 0.5) * 0.02,
-      offset: 0.85 + Math.random() * 0.3,
+    // Click to dismiss immediately
+    const handleDismiss = () => {
+      setIsFading(true);
+      setTimeout(onComplete, 150);
+    };
+    window.addEventListener('click', handleDismiss, { once: true });
+    window.addEventListener('keydown', handleDismiss, { once: true });
+
+    const blockSize = 12;
+    const duration = 650; // Snappy 650ms intro animation
+    const ring1: Block[] = Array.from({ length: 120 }, (_, i) => ({
+      angle: (2 * Math.PI * i) / 120 + (Math.random() - 0.5) * 0.04,
+      offset: 0.85 + Math.random() * 0.25,
     }));
 
-    const ring2: Block[] = Array.from({ length: 180 }, (_, i) => ({
-      angle: (2 * Math.PI * i) / 180 + (Math.random() - 0.5) * 0.02,
-      offset: 0.92 + Math.random() * 0.12,
+    const ring2: Block[] = Array.from({ length: 60 }, (_, i) => ({
+      angle: (2 * Math.PI * i) / 60 + (Math.random() - 0.5) * 0.04,
+      offset: 0.92 + Math.random() * 0.1,
     }));
 
     let animationFrameId: number;
@@ -62,7 +66,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
       if (startTime === null) startTime = now;
       const elapsed = now - startTime;
       const t = Math.min(1, elapsed / duration);
-      // ease-out cubic: 1 - (1 - t)^3
+      // ease-out cubic
       const ease = 1 - Math.pow(1 - t, 3);
 
       const maxRadius = Math.sqrt(width * width + height * height) / 2;
@@ -86,8 +90,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
         ctx.fill();
       }
 
-      // Punch 360 square blocks
-      for (let i = 0; i < 360; i++) {
+      // Punch lightweight block rings
+      for (let i = 0; i < ring1.length; i++) {
         const b = ring1[i];
         const r = currentRadius * b.offset;
         const bx = cx + Math.cos(b.angle) * r - blockSize / 2;
@@ -95,9 +99,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
         ctx.fillRect(bx, by, blockSize, blockSize);
       }
 
-      // Punch second ring of 180 blocks at 80% size
       const sz = blockSize * 0.8;
-      for (let i = 0; i < 180; i++) {
+      for (let i = 0; i < ring2.length; i++) {
         const b = ring2[i];
         const r2 = currentRadius * b.offset;
         const bx2 = cx + Math.cos(b.angle) * r2 - sz / 2;
@@ -114,7 +117,7 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
         setIsFading(true);
         setTimeout(() => {
           onComplete();
-        }, 400);
+        }, 200);
       }
     };
 
@@ -123,14 +126,14 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onComplete }) => {
     return () => {
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('click', handleDismiss);
+      window.removeEventListener('keydown', handleDismiss);
     };
   }, [onComplete]);
 
   return (
     <div
-      className={`fixed inset-0 z-[9999] transition-opacity ${
-        reducedMotion ? 'duration-200' : 'duration-[400ms]'
-      } ease-out ${
+      className={`fixed inset-0 z-[9999] transition-opacity duration-200 ease-out ${
         isFading ? 'opacity-0 pointer-events-none' : 'opacity-100 pointer-events-auto'
       }`}
       aria-hidden="true"

@@ -2,14 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 
 export function useReveal(threshold: number = 0.1): [React.RefObject<HTMLDivElement | null>, boolean] {
   const ref = useRef<HTMLDivElement | null>(null);
-  const [isVisible, setIsVisible] = useState(false);
+  const [isVisible, setIsVisible] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
 
   useEffect(() => {
-    // Check prefers-reduced-motion
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      setIsVisible(true);
-      return;
-    }
+    if (isVisible) return;
 
     const element = ref.current;
     if (!element) return;
@@ -33,7 +31,7 @@ export function useReveal(threshold: number = 0.1): [React.RefObject<HTMLDivElem
     return () => {
       observer.disconnect();
     };
-  }, [threshold]);
+  }, [threshold, isVisible]);
 
   return [ref, isVisible];
 }

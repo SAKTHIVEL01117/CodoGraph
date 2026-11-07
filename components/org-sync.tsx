@@ -1,0 +1,31 @@
+"use client";
+
+/**
+ * CodoGraph — Client-side active organization synchronizer.
+ *
+ * Ensures that the organization resolved on the server is made active in the
+ * browser's Clerk session. Once setActive({ organization: activeOrgId })
+ * resolves, the Clerk session token rotates and includes the org_id and org_role
+ * claims in its JWT payload for Supabase and Postgres RLS.
+ */
+import { useEffect, useRef } from "react";
+import { useOrganization, useClerk } from "@clerk/nextjs";
+
+export function OrgSync({ activeOrgId }: { activeOrgId: string | null }) {
+  const { organization, isLoaded } = useOrganization();
+  const { setActive } = useClerk();
+  const syncAttempted = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isLoaded || !activeOrgId) return;
+    if (organization?.id === activeOrgId) return;
+    if (syncAttempted.current === activeOrgId) return;
+
+    syncAttempted.current = activeOrgId;
+    setActive({ organization: activeOrgId }).catch((err) => {
+      console.warn("[CodoGraph] Organization sync warning:", err);
+    });
+  }, [isLoaded, organization, activeOrgId, setActive]);
+
+  return null;
+}

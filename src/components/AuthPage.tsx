@@ -1,17 +1,110 @@
-import React, { useState } from 'react';
-import { Mail, ChevronRight, Lock } from 'lucide-react';
+"use client";
+
+/**
+ * CodoGraph — Authentication page (Vite/client-side SPA).
+ *
+ * This component wraps Clerk's <SignIn /> and <SignUp /> components inside the
+ * existing CodoGraph visual identity (video background, editorial layout,
+ * sensor nodes, topographic contours).
+ *
+ * ALL authentication — Google OAuth, GitHub OAuth, Microsoft OAuth, and email
+ * verification — flows through Clerk's real auth infrastructure.
+ *
+ * REMOVED:
+ *  - handleCompleteAuth() with fake email strings
+ *  - onClick handlers calling handleCompleteAuth('github-dev@codograph.io')
+ *  - onClick handlers calling handleCompleteAuth('google-dev@codograph.io')
+ *  - onClick handlers calling handleCompleteAuth('msft-dev@codograph.io')
+ *  - Custom email form with fake handleSubmit()
+ *
+ * REPLACED WITH:
+ *  - Clerk <SignIn /> and <SignUp /> components with CodoGraph appearance tokens
+ *  - Real OAuth flows, real email verification, real session establishment
+ *
+ * Note: This component is used by the Vite SPA (src/) on port 5173.
+ * The Next.js App Router has its own sign-in/sign-up pages at:
+ *   app/sign-in/[[...sign-in]]/page.tsx
+ *   app/sign-up/[[...sign-up]]/page.tsx
+ */
+import React, { useState, Suspense } from 'react';
+import { SignIn, SignUp } from '@clerk/nextjs';
+import { dark } from '@clerk/themes';
+import { ChevronRight } from 'lucide-react';
 
 interface AuthPageProps {
   onBackToHome: () => void;
+  onSignedIn?: (email: string) => void;
 }
 
-export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
-  const [email, setEmail] = useState('');
+const CLERK_APPEARANCE = {
+  theme: dark,
+  variables: {
+    colorPrimary: '#F64302',
+    colorPrimaryForeground: '#000000',
+    colorBackground: '#0c0d11',
+    colorInput: '#13151b',
+    colorInputForeground: '#ffffff',
+    colorForeground: '#ffffff',
+    colorNeutral: '#ffffff',
+    borderRadius: '0.75rem',
+    fontFamily: 'JetBrains Mono, monospace',
+  },
+  elements: {
+    card: 'bg-[#0c0d11]/95 backdrop-blur-xl border border-white/10 rounded-3xl p-6 sm:p-8 shadow-2xl text-white',
+    headerTitle: 'font-bubbledot text-2xl text-white tracking-tight',
+    headerSubtitle: 'font-jetbrains text-xs text-white/60',
+    socialButtonsRoot: 'flex items-center justify-center gap-3 w-full',
+    socialButtonsIconButton:
+      'w-full h-11 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl text-white transition-all active:scale-[0.98] flex items-center justify-center',
+    socialButtonsBlockButton:
+      'w-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl text-white font-jetbrains text-xs transition-all active:scale-[0.98]',
+    socialButtonsBlockButtonText: 'font-jetbrains text-xs text-white font-medium',
+    dividerRow: 'my-4',
+    dividerLine: 'bg-white/10',
+    dividerText: 'text-white/40 font-jetbrains text-xs px-2',
+    formFieldLabel: 'text-white/90 font-jetbrains text-xs font-medium mb-1.5 block',
+    formFieldInput:
+      'bg-[#13151b] border border-white/10 text-white rounded-xl text-xs sm:text-sm font-jetbrains placeholder:text-white/30 focus:border-[#F64302]/60 focus:ring-1 focus:ring-[#F64302]/60 h-11',
+    formFieldHintText: 'text-white/40 font-jetbrains text-[11px]',
+    formFieldErrorText: 'text-red-400 font-jetbrains text-xs mt-1',
+    formButtonPrimary:
+      'bg-white hover:bg-white/90 text-black font-jetbrains font-semibold text-xs sm:text-sm rounded-xl py-3 active:scale-[0.98] transition-all shadow-md mt-2',
+    footer: 'border-t border-white/5 pt-4 mt-6',
+    footerAction: 'flex items-center justify-center gap-1.5 text-xs',
+    footerActionText: 'text-white/70 font-jetbrains text-xs',
+    footerActionLink: 'text-[#F64302] hover:text-[#ff4e0d] font-jetbrains text-xs font-semibold hover:underline',
+    identityPreview: 'bg-[#13151b] border border-white/10 rounded-xl p-2.5 text-white',
+    identityPreviewText: 'text-white font-jetbrains text-xs',
+    identityPreviewEditButton: 'text-[#F64302] hover:text-[#ff4e0d] text-xs font-semibold',
+    formHeaderTitle: 'text-white font-bubbledot text-xl',
+    formHeaderSubtitle: 'text-white/60 font-jetbrains text-xs',
+    alert: 'bg-red-950/60 border border-red-800/40 text-red-300 font-jetbrains text-xs rounded-xl p-3',
+    alertText: 'text-red-300 font-jetbrains text-xs',
+    otpCodeFieldInput: 'bg-[#13151b] border border-white/15 text-white rounded-lg font-jetbrains text-lg',
+  },
+} as const;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    // UI only - no real authentication
+export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
+  const [mode, setMode] = useState<'signin' | 'signup'>(() => {
+    if (typeof window !== 'undefined') {
+      return window.location.pathname.startsWith('/sign-up') ||
+        window.location.hash === '#signup'
+        ? 'signup'
+        : 'signin';
+    }
+    return 'signin';
+  });
+
+  const toggleMode = () => {
+    const nextMode = mode === 'signin' ? 'signup' : 'signin';
+    setMode(nextMode);
+    if (typeof window !== 'undefined') {
+      window.history.pushState(
+        {},
+        '',
+        nextMode === 'signin' ? '/sign-in' : '/sign-up'
+      );
+    }
   };
 
   return (
@@ -28,32 +121,58 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
         >
           <source src="/assets/aeris/aeris-hero-atmosphere.mp4" type="video/mp4" />
         </video>
-        {/* Dark vignette overlay */}
         <div className="absolute inset-0 bg-black/60 pointer-events-none" />
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/60 pointer-events-none" />
       </div>
 
-      {/* Decorative SVG Topographic contours in bottom-left */}
-      <div className="absolute -bottom-10 -left-10 w-[600px] h-[450px] pointer-events-none z-10 opacity-35" aria-hidden="true">
-        <svg viewBox="0 0 600 450" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-full h-full">
-          <path d="M-50 400C120 380 220 320 320 380C420 440 500 350 650 390" stroke="#505560" strokeWidth="1" strokeOpacity="0.5" />
-          <path d="M-50 350C100 320 200 280 290 320C380 360 480 300 650 340" stroke="#505560" strokeWidth="1" strokeOpacity="0.4" />
-          <path d="M-50 300C80 270 180 230 260 270C340 310 440 250 650 290" stroke="#505560" strokeWidth="1" strokeOpacity="0.3" />
-          <path d="M-50 250C60 220 150 190 230 220C310 250 400 200 650 240" stroke="#505560" strokeWidth="1" strokeOpacity="0.25" />
+      {/* Decorative SVG topographic contours */}
+      <div
+        className="absolute -bottom-10 -left-10 w-[600px] h-[450px] pointer-events-none z-10 opacity-35"
+        aria-hidden="true"
+      >
+        <svg
+          viewBox="0 0 600 450"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          className="w-full h-full"
+        >
+          <path
+            d="M-50 400C120 380 220 320 320 380C420 440 500 350 650 390"
+            stroke="#505560"
+            strokeWidth="1"
+            strokeOpacity="0.5"
+          />
+          <path
+            d="M-50 350C100 320 200 280 290 320C380 360 480 300 650 340"
+            stroke="#505560"
+            strokeWidth="1"
+            strokeOpacity="0.4"
+          />
+          <path
+            d="M-50 300C80 270 180 230 260 270C340 310 440 250 650 290"
+            stroke="#505560"
+            strokeWidth="1"
+            strokeOpacity="0.3"
+          />
+          <path
+            d="M-50 250C60 220 150 190 230 220C310 250 400 200 650 240"
+            stroke="#505560"
+            strokeWidth="1"
+            strokeOpacity="0.25"
+          />
         </svg>
       </div>
 
-      {/* Scattered Ambient Glowing Orange Sensor Nodes matching the reference */}
-      <div className="absolute inset-0 pointer-events-none z-10 overflow-hidden" aria-hidden="true">
-        {/* Bottom Left crosshair node */}
+      {/* Ambient orange sensor nodes */}
+      <div
+        className="absolute inset-0 pointer-events-none z-10 overflow-hidden"
+        aria-hidden="true"
+      >
         <div className="absolute bottom-28 left-20">
-          {/* Crosshair reticle lines */}
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-[1px] bg-gradient-to-r from-transparent via-[#F64302]/70 to-transparent" />
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-16 w-[1px] bg-gradient-to-b from-transparent via-[#F64302]/70 to-transparent" />
           <div className="w-4 h-4 bg-[#F64302] rounded-[2px] shadow-[0_0_16px_#F64302]" />
         </div>
-
-        {/* Scattered small glowing orange blocks */}
         <div className="absolute top-44 left-[18%] w-2 h-2 bg-[#F64302] rounded-[1px] shadow-[0_0_8px_#F64302] opacity-80" />
         <div className="absolute top-36 left-[30%] w-2.5 h-2.5 bg-[#F64302] rounded-[1px] shadow-[0_0_10px_#F64302]" />
         <div className="absolute top-60 left-[32%] w-1.5 h-1.5 bg-[#F64302]/70 rounded-[1px]" />
@@ -64,10 +183,13 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
         <div className="absolute bottom-24 right-20 w-1.5 h-1.5 bg-[#F64302]/60 rounded-[1px]" />
       </div>
 
-      {/* Top Header Row */}
+      {/* Top Header */}
       <header className="relative z-20 w-full max-w-7xl mx-auto px-6 lg:px-12 pt-8 flex items-center justify-between">
-        {/* Brand Logo & Name */}
-        <div className="flex items-center gap-3.5">
+        <button
+          type="button"
+          onClick={onBackToHome}
+          className="flex items-center gap-3.5 focus-visible:ring-2 focus-visible:ring-[#F64302] rounded-lg p-1 outline-none text-left"
+        >
           <div className="w-8 h-8 text-white">
             <svg
               width="32"
@@ -88,9 +210,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
           <span className="font-jetbrains font-bold tracking-widest text-sm text-white">
             CodoGraph
           </span>
-        </div>
+        </button>
 
-        {/* Top-Right: Back to Home Button */}
         <button
           onClick={onBackToHome}
           className="group flex items-center bg-[#111216]/80 hover:bg-[#1a1c22] border border-white/10 rounded-xl p-1.5 pr-4 pl-1.5 text-xs font-jetbrains text-white transition-all active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-[#F64302] outline-none shadow-sm"
@@ -102,9 +223,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
         </button>
       </header>
 
-      {/* Main Content: Two Column Editorial Grid */}
+      {/* Main Content */}
       <main className="relative z-20 w-full max-w-7xl mx-auto px-6 lg:px-12 py-10 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
-        {/* Left Column: Editorial Headline & Subtitle */}
+        {/* Left Column: Editorial headline */}
         <div className="lg:col-span-6 flex flex-col justify-center">
           <h1 className="font-bubbledot text-4xl sm:text-6xl lg:text-7xl leading-[1.02] tracking-tight">
             <span className="block text-white">Map Your</span>
@@ -117,136 +238,59 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onBackToHome }) => {
           <p className="font-jetbrains text-sm sm:text-base text-white/60 mt-8 leading-relaxed max-w-md">
             Sign in to explore interactive code maps, visualize dependencies, and uncover insights.
           </p>
+
+          {/* Mode toggle */}
+          <div className="mt-6 flex items-center gap-2">
+            <span className="font-jetbrains text-xs text-white/50">
+              {mode === 'signin' ? "Don't have an account?" : 'Already have an account?'}
+            </span>
+            <button
+              type="button"
+              onClick={toggleMode}
+              className="font-jetbrains text-xs text-[#F64302] hover:underline font-medium focus-visible:ring-1 focus-visible:ring-[#F64302] outline-none"
+            >
+              {mode === 'signin' ? 'Create one' : 'Sign in'}
+            </button>
+          </div>
         </div>
 
-        {/* Right Column: Card Container */}
+        {/* Right Column: Real Clerk auth component */}
         <div className="lg:col-span-6 flex justify-center lg:justify-end">
-          <div className="w-full max-w-[480px] bg-[#0c0d11]/85 backdrop-blur-xl border border-white/10 rounded-3xl p-8 sm:p-10 shadow-2xl relative">
-            {/* Card Header with Crosshair Accent */}
-            <div className="flex items-start gap-4 mb-8">
-              {/* Reticle glowing square */}
-              <div className="relative mt-1 shrink-0">
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-[1px] bg-gradient-to-r from-transparent via-[#F64302] to-transparent" />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-12 w-[1px] bg-gradient-to-b from-transparent via-[#F64302] to-transparent" />
-                <div className="w-3.5 h-3.5 bg-[#F64302] rounded-[1px] shadow-[0_0_12px_#F64302]" />
-              </div>
-
-              <div>
-                <h2 className="font-bubbledot text-2xl sm:text-3xl text-white tracking-tight">
-                  {mode === 'signin' ? 'Welcome Back' : 'Create Account'}
-                </h2>
-                <p className="font-jetbrains text-xs sm:text-sm text-white/60 mt-1">
-                  {mode === 'signin'
-                    ? 'Sign in to continue to CodoGraph'
-                    : 'Sign up to continue to CodoGraph'}
-                </p>
-              </div>
+          <div className="relative w-full">
+            {/* Crosshair accent above the card */}
+            <div className="absolute -top-3 left-8 z-30 pointer-events-none">
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-12 h-[1px] bg-gradient-to-r from-transparent via-[#F64302] to-transparent" />
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-12 w-[1px] bg-gradient-to-b from-transparent via-[#F64302] to-transparent" />
+              <div className="w-3.5 h-3.5 bg-[#F64302] rounded-[1px] shadow-[0_0_12px_#F64302]" />
             </div>
 
-            {/* Social Authentication Providers Row */}
-            <div className="grid grid-cols-3 gap-3 mb-6">
-              {/* GitHub */}
-              <button
-                type="button"
-                className="flex items-center justify-center py-3 px-4 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl transition-all focus-visible:ring-2 focus-visible:ring-[#F64302] outline-none active:scale-[0.98]"
-                aria-label="Continue with GitHub"
-              >
-                <svg className="w-5 h-5 text-white" viewBox="0 0 24 24" fill="currentColor">
-                  <path fillRule="evenodd" clipRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
-                </svg>
-              </button>
-
-              {/* Google */}
-              <button
-                type="button"
-                className="flex items-center justify-center py-3 px-4 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl transition-all focus-visible:ring-2 focus-visible:ring-[#F64302] outline-none active:scale-[0.98]"
-                aria-label="Continue with Google"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z" />
-                  <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z" />
-                  <path fill="#FBBC05" d="M5.28 14.27a7.22 7.22 0 010-4.54V6.58H1.25a11.98 11.98 0 000 10.84l4.03-3.15z" />
-                  <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z" />
-                </svg>
-              </button>
-
-              {/* Microsoft */}
-              <button
-                type="button"
-                className="flex items-center justify-center py-3 px-4 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-xl transition-all focus-visible:ring-2 focus-visible:ring-[#F64302] outline-none active:scale-[0.98]"
-                aria-label="Continue with Microsoft"
-              >
-                <div className="grid grid-cols-2 gap-1 w-4 h-4">
-                  <div className="bg-[#F25022] w-full h-full rounded-[1px]" />
-                  <div className="bg-[#7FBA00] w-full h-full rounded-[1px]" />
-                  <div className="bg-[#00A4EF] w-full h-full rounded-[1px]" />
-                  <div className="bg-[#FFB900] w-full h-full rounded-[1px]" />
+            <Suspense
+              fallback={
+                <div className="p-8 text-center text-xs text-white/50 font-jetbrains">
+                  Loading authentication...
                 </div>
-              </button>
-            </div>
-
-            {/* Divider */}
-            <div className="relative flex items-center justify-center my-6">
-              <div className="w-full border-t border-white/10" />
-              <span className="absolute bg-[#0c0d11] px-3 font-jetbrains text-xs text-white/40">
-                or
-              </span>
-            </div>
-
-            {/* Form */}
-            <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-              <div>
-                <label className="block text-xs font-jetbrains font-medium text-white/90 mb-2">
-                  Email address
-                </label>
-                <div className="relative flex items-center">
-                  <div className="absolute left-3.5 text-white/40 pointer-events-none">
-                    <Mail className="w-4 h-4" />
-                  </div>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Enter your email address"
-                    className="w-full pl-10 pr-4 py-3 bg-[#13151b]/70 border border-white/10 rounded-xl text-xs sm:text-sm font-jetbrains text-white placeholder:text-white/30 focus:border-white/30 focus-visible:ring-1 focus-visible:ring-[#F64302] outline-none transition-all"
-                  />
-                </div>
-              </div>
-
-              {/* Submit CTA */}
-              <button
-                type="submit"
-                className="w-full mt-2 py-3.5 bg-white text-black font-jetbrains font-semibold text-xs sm:text-sm rounded-xl flex items-center justify-center gap-2 hover:bg-white/90 active:scale-[0.98] transition-all focus-visible:ring-2 focus-visible:ring-[#F64302] outline-none shadow-lg cursor-pointer"
-              >
-                <span>Continue</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-
-              {/* Toggle Sign In / Sign Up */}
-              <div className="mt-4 text-center">
-                <span className="font-jetbrains text-xs text-white/60">
-                  {mode === 'signin' ? "Don't have an account? " : 'Already have an account? '}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setMode(mode === 'signin' ? 'signup' : 'signin')}
-                  className="font-jetbrains text-xs text-[#F64302] hover:underline font-medium focus-visible:ring-1 focus-visible:ring-[#F64302] outline-none"
-                >
-                  {mode === 'signin' ? 'Sign up' : 'Sign in'}
-                </button>
-              </div>
-
-              {/* Bottom Security Badge */}
-              <div className="mt-6 pt-4 border-t border-white/5 flex items-center justify-center gap-2 text-white/40 font-jetbrains text-xs">
-                <Lock className="w-3.5 h-3.5" />
-                <span>Secured by Clerk</span>
-              </div>
-            </form>
+              }
+            >
+              {mode === 'signin' ? (
+                <SignIn
+                  appearance={CLERK_APPEARANCE}
+                  routing="hash"
+                  signUpUrl="/sign-up"
+                  fallbackRedirectUrl="/workspace"
+                />
+              ) : (
+                <SignUp
+                  appearance={CLERK_APPEARANCE}
+                  routing="hash"
+                  signInUrl="/sign-in"
+                  fallbackRedirectUrl="/workspace"
+                />
+              )}
+            </Suspense>
           </div>
         </div>
       </main>
 
-      {/* Footer spacer */}
       <footer className="relative z-20 py-4" />
     </div>
   );
