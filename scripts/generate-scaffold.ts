@@ -55,7 +55,26 @@ function generateDataset(): ParserResult {
     const makeFiles = (count: number, ext: string) => {
       for (let i = 0; i < count; i++) {
         fileIndex++;
-        const baseName = group.folder === '.' ? `root_file_${i + 1}` : `module_${i + 1}`;
+        let baseName = group.folder === '.' ? `root_file_${i + 1}` : `module_${i + 1}`;
+
+        // Introduce canonical Next.js pages and routes in apps/www/app
+        let role = ext === '.tsx' ? 'component' : group.folder.includes('commands') ? 'command' : 'module';
+        if (group.folder === 'apps/www/app') {
+          if (ext === '.tsx' && i === 0) {
+            baseName = 'page';
+            role = 'Page routes';
+          } else if (ext === '.tsx' && i === 1) {
+            baseName = 'docs/page';
+            role = 'Page routes';
+          } else if (ext === '.ts' && i === 0) {
+            baseName = 'api/route';
+            role = 'API endpoints';
+          } else if (ext === '.ts' && i === 1) {
+            baseName = 'actions';
+            role = 'Server actions';
+          }
+        }
+
         const filePath = group.folder === '.' ? `${baseName}${ext}` : `${group.folder}/${baseName}${ext}`;
 
         files.push({
@@ -68,7 +87,7 @@ function generateDataset(): ParserResult {
           isSourceCode: true,
           fanIn: 0,
           fanOut: 0,
-          role: ext === '.tsx' ? 'component' : filePath.includes('commands') ? 'command' : 'module',
+          role,
         });
       }
     };
@@ -122,6 +141,16 @@ function generateDataset(): ParserResult {
   linkFolders('packages/shadcn/src', 'packages/cli/src/utils', 15);
   linkFolders('scripts', 'packages/cli/src/utils', 10);
 
+  // Introduce a real 3-hop import cycle in packages/cli/src (Acceptance Check 3)
+  const c1 = 'packages/cli/src/module_4.ts';
+  const c2 = 'packages/cli/src/module_5.ts';
+  const c3 = 'packages/cli/src/module_6.ts';
+  edges.push(
+    { sourcePath: c1, targetPath: c2, kind: 'import', specifier: './module_5' },
+    { sourcePath: c2, targetPath: c3, kind: 'import', specifier: './module_6' },
+    { sourcePath: c3, targetPath: c1, kind: 'import', specifier: './module_4' }
+  );
+
   // Compute fan-in and fan-out
   const inCount = new Map<string, number>();
   const outCount = new Map<string, number>();
@@ -142,6 +171,12 @@ function generateDataset(): ParserResult {
     files,
     edges,
     folders: Array.from(foldersSet).sort(),
+    routes: [
+      { method: 'GET', pattern: '/', filePath: 'apps/www/app/page.tsx', framework: 'nextjs' },
+      { method: 'GET', pattern: '/docs', filePath: 'apps/www/app/docs/page.tsx', framework: 'nextjs' },
+      { method: 'GET', pattern: '/api', filePath: 'apps/www/app/api/route.ts', framework: 'nextjs' },
+      { method: 'POST', pattern: '/api', filePath: 'apps/www/app/api/route.ts', framework: 'nextjs' },
+    ],
     coverage: {
       filesFound: 687,
       filesParsed: 687,

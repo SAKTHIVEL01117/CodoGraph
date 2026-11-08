@@ -1,10 +1,10 @@
 {
   "repositoryRoot": "shadcn-ui/ui",
-  "timestamp": "2026-11-07T19:17:59.990Z",
+  "timestamp": "2026-11-08T17:31:42.078Z",
   "adapter": "nextjs",
   "files": [
     {
-      "path": "apps/www/app/module_1.ts",
+      "path": "apps/www/app/api/route.ts",
       "folder": "apps/www/app",
       "extension": ".ts",
       "lines": 37,
@@ -13,10 +13,10 @@
       "isSourceCode": true,
       "fanIn": 0,
       "fanOut": 1,
-      "role": "module"
+      "role": "API endpoints"
     },
     {
-      "path": "apps/www/app/module_2.ts",
+      "path": "apps/www/app/actions.ts",
       "folder": "apps/www/app",
       "extension": ".ts",
       "lines": 54,
@@ -25,7 +25,7 @@
       "isSourceCode": true,
       "fanIn": 0,
       "fanOut": 1,
-      "role": "module"
+      "role": "Server actions"
     },
     {
       "path": "apps/www/app/module_3.ts",
@@ -220,7 +220,7 @@
       "role": "module"
     },
     {
-      "path": "apps/www/app/module_1.tsx",
+      "path": "apps/www/app/page.tsx",
       "folder": "apps/www/app",
       "extension": ".tsx",
       "lines": 343,
@@ -229,10 +229,10 @@
       "isSourceCode": true,
       "fanIn": 0,
       "fanOut": 1,
-      "role": "component"
+      "role": "Page routes"
     },
     {
-      "path": "apps/www/app/module_2.tsx",
+      "path": "apps/www/app/docs/page.tsx",
       "folder": "apps/www/app",
       "extension": ".tsx",
       "lines": 360,
@@ -241,7 +241,7 @@
       "isSourceCode": true,
       "fanIn": 0,
       "fanOut": 1,
-      "role": "component"
+      "role": "Page routes"
     },
     {
       "path": "apps/www/app/module_3.tsx",
@@ -6563,8 +6563,8 @@
       "sizeBytes": 1083,
       "contentHash": "hash_547_ts",
       "isSourceCode": true,
-      "fanIn": 7,
-      "fanOut": 0,
+      "fanIn": 8,
+      "fanOut": 1,
       "role": "module"
     },
     {
@@ -6575,8 +6575,8 @@
       "sizeBytes": 1172,
       "contentHash": "hash_548_ts",
       "isSourceCode": true,
-      "fanIn": 0,
-      "fanOut": 0,
+      "fanIn": 1,
+      "fanOut": 1,
       "role": "module"
     },
     {
@@ -6587,8 +6587,8 @@
       "sizeBytes": 1261,
       "contentHash": "hash_549_ts",
       "isSourceCode": true,
-      "fanIn": 0,
-      "fanOut": 0,
+      "fanIn": 1,
+      "fanOut": 1,
       "role": "module"
     },
     {
@@ -8250,13 +8250,13 @@
   ],
   "edges": [
     {
-      "sourcePath": "apps/www/app/module_1.ts",
+      "sourcePath": "apps/www/app/api/route.ts",
       "targetPath": "apps/www/components/module_1.ts",
       "kind": "import",
       "specifier": "./apps/www/components/module_1.ts"
     },
     {
-      "sourcePath": "apps/www/app/module_2.ts",
+      "sourcePath": "apps/www/app/actions.ts",
       "targetPath": "apps/www/components/module_4.ts",
       "kind": "import",
       "specifier": "./apps/www/components/module_4.ts"
@@ -8358,13 +8358,13 @@
       "specifier": "./apps/www/components/module_28.tsx"
     },
     {
-      "sourcePath": "apps/www/app/module_1.tsx",
+      "sourcePath": "apps/www/app/page.tsx",
       "targetPath": "apps/www/components/module_31.tsx",
       "kind": "import",
       "specifier": "./apps/www/components/module_31.tsx"
     },
     {
-      "sourcePath": "apps/www/app/module_2.tsx",
+      "sourcePath": "apps/www/app/docs/page.tsx",
       "targetPath": "apps/www/components/module_34.tsx",
       "kind": "import",
       "specifier": "./apps/www/components/module_34.tsx"
@@ -10426,6 +10426,24 @@
       "targetPath": "packages/cli/src/utils/module_28.ts",
       "kind": "import",
       "specifier": "./packages/cli/src/utils/module_28.ts"
+    },
+    {
+      "sourcePath": "packages/cli/src/module_4.ts",
+      "targetPath": "packages/cli/src/module_5.ts",
+      "kind": "import",
+      "specifier": "./module_5"
+    },
+    {
+      "sourcePath": "packages/cli/src/module_5.ts",
+      "targetPath": "packages/cli/src/module_6.ts",
+      "kind": "import",
+      "specifier": "./module_6"
+    },
+    {
+      "sourcePath": "packages/cli/src/module_6.ts",
+      "targetPath": "packages/cli/src/module_4.ts",
+      "kind": "import",
+      "specifier": "./module_4"
     }
   ],
   "folders": [
@@ -10447,14 +10465,40 @@
     "packages/shadcn/test",
     "scripts"
   ],
+  "routes": [
+    {
+      "method": "GET",
+      "pattern": "/",
+      "filePath": "apps/www/app/page.tsx",
+      "framework": "nextjs"
+    },
+    {
+      "method": "GET",
+      "pattern": "/docs",
+      "filePath": "apps/www/app/docs/page.tsx",
+      "framework": "nextjs"
+    },
+    {
+      "method": "GET",
+      "pattern": "/api",
+      "filePath": "apps/www/app/api/route.ts",
+      "framework": "nextjs"
+    },
+    {
+      "method": "POST",
+      "pattern": "/api",
+      "filePath": "apps/www/app/api/route.ts",
+      "framework": "nextjs"
+    }
+  ],
   "coverage": {
     "filesFound": 687,
     "filesParsed": 687,
     "filesSkipped": 0,
     "skipReasons": {},
     "skippedFiles": [],
-    "importsTotal": 483,
-    "importsResolvedInternal": 363,
+    "importsTotal": 486,
+    "importsResolvedInternal": 366,
     "importsExternal": 120,
     "importsExcluded": 0,
     "importsUnresolved": 0,

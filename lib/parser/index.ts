@@ -19,14 +19,13 @@ import type {
   ParsedEdge,
   UnresolvedImport,
   CoverageReport,
-  SkippedFile,
 } from './types.ts';
 import { walkRepository } from './walker.ts';
 import { loadTsConfigPaths, resolveModuleSpecifier, type TsConfigPaths } from './resolver.ts';
 import { extractSpecifiersFromSource } from './ast.ts';
 import { deduplicateEdges, computeGraphMetrics, extractDistinctFolders } from './graph.ts';
 import type { FrameworkAdapter } from './adapters/types.ts';
-import { fallbackAdapter } from './adapters/fallback.ts';
+import { detectAdapter } from './adapters/index.ts';
 
 export interface ParserOptions {
   /** Optional custom framework adapter. Defaults to fallbackAdapter ('none'). */
@@ -59,8 +58,8 @@ export function parseRepository(
   // 2. Load TypeScript configuration paths (aliases)
   const tsConfig = options.tsConfig ?? loadTsConfigPaths(absRoot);
 
-  // 3. Resolve framework adapter (strictly defaults to fallback 'none' with zero assumptions)
-  const adapter = options.adapter ?? fallbackAdapter;
+  // 3. Resolve framework adapter (evaluates registered adapters in fixed order, falls back to 'none')
+  const adapter = options.adapter ?? detectAdapter(absRoot, sourceFiles);
 
   // 4. Initialize ts-morph project for AST parsing
   const project = new Project({
@@ -101,7 +100,7 @@ export function parseRepository(
     let content = '';
     try {
       content = fs.readFileSync(fullPath, 'utf8');
-    } catch (err) {
+    } catch {
       // If unreadable, skip
       continue;
     }
@@ -185,8 +184,13 @@ export function parseRepository(
 
   // 7. Calculate pure graph metrics (fan-in, fan-out, role classification)
   const files = computeGraphMetrics(sourceFiles, edges, (f) =>
-    adapter.classifyFile ? adapter.classifyFile(f) : null
+    adapter.classifyFile ? adapter.classifyFile(f, { repositoryRoot: absRoot }) : null
   );
+
+  // 7b. Extract exact routes via the selected framework adapter
+  const routes = adapter.extractRoutes
+    ? adapter.extractRoutes(absRoot, sourceFiles, project)
+    : [];
 
   // 8. Extract distinct folders
   const folders = extractDistinctFolders(files);
@@ -227,6 +231,7 @@ export function parseRepository(
     edges,
     folders,
     coverage,
+    routes,
   };
 }
 
@@ -235,5 +240,4 @@ export * from './walker.ts';
 export * from './resolver.ts';
 export * from './ast.ts';
 export * from './graph.ts';
-export * from './adapters/types.ts';
-export * from './adapters/fallback.ts';
+export * from './adapters/index.ts';

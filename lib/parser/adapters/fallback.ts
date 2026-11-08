@@ -19,4 +19,9 @@ export const fallbackAdapter: FrameworkAdapter = {
     // Fallback makes zero framework assumptions
     return null;
   },
+
+  extractRoutes(): [] {
+    // Generic repositories have no framework-derived routes
+    return [];
+  },
 };

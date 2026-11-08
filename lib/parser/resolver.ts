@@ -266,7 +266,7 @@ export function resolveModuleSpecifier(
     }
   }
 
-  // 6. External npm package dependencies (e.g. "react", "@clerk/nextjs", "ts-morph")
+  // 6. External npm package dependencies (e.g. "react", "@clerk/backend", "ts-morph")
   const pkgParts = trimmed.split('/');
   const packageName = trimmed.startsWith('@') && pkgParts.length >= 2
     ? `${pkgParts[0]}/${pkgParts[1]}`

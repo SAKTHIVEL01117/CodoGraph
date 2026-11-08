@@ -113,6 +113,17 @@ export interface CoverageReport {
   unresolvedDetails: UnresolvedImport[];
 }
 
+export interface ExtractedRoute {
+  /** HTTP method in uppercase (e.g. "GET", "POST", "PUT", "DELETE"). */
+  method: string;
+  /** Full route path pattern (e.g. "/api/analyses", "/users/:id", "/"). */
+  pattern: string;
+  /** Relative POSIX path of the source file implementing the route. */
+  filePath: string;
+  /** Framework that declared the route (e.g. adapter name). */
+  framework?: string;
+}
+
 export interface ParserResult {
   /** Absolute path of the parsed repository root directory. */
   repositoryRoot: string;
@@ -128,4 +139,6 @@ export interface ParserResult {
   folders: string[];
   /** Comprehensive coverage audit report. */
   coverage: CoverageReport;
+  /** Exact extracted routes discovered by framework adapters. */
+  routes: ExtractedRoute[];
 }
