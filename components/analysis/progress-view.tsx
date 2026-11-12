@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth, useSession } from "@clerk/nextjs";
@@ -18,6 +18,7 @@ import {
   Clock,
   Terminal,
 } from "lucide-react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { createSupabaseClient } from "@/lib/supabase/client";
 import type { PipelineStage, AnalysisRecord } from "@/lib/pipeline/storage";
 
@@ -74,7 +75,7 @@ export function AnalysisProgressView({
 }: AnalysisProgressViewProps) {
   const router = useRouter();
   const { session } = useSession();
-  const { getToken } = useAuth();
+  const { getToken } = useAuth({ treatPendingAsSignedOut: false });
 
   const [analysis, setAnalysis] = useState<AnalysisRecord | null>(
     initialAnalysis || null
@@ -94,31 +95,66 @@ export function AnalysisProgressView({
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [isRetrying, setIsRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
 
-  const handleRetry = async () => {
-    if (!analysis?.repository_url || isRetrying) return;
-    setIsRetrying(true);
+  const fetchLatest = useCallback(async () => {
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repositoryUrl: analysis.repository_url,
-          branch: analysis.branch || "main",
-        }),
+      const token = await getToken();
+      const res = await fetch(`/api/analyses/${analysisId}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
+      if (!res.ok) return;
       const data = await res.json();
-      if (data.analysisId) {
-        if (data.analysisId === analysisId) {
-          window.location.reload();
-        } else {
-          router.push(`/analysis/${data.analysisId}`);
-        }
-      } else {
-        router.refresh();
+      if (data.analysis) {
+        setAnalysis(data.analysis);
+        setStatus(data.analysis.status);
+        setCurrentStage(data.analysis.stage || "fetching");
+        setCommitHash(data.analysis.commit_hash || null);
+        setErrorMessage(data.analysis.error_message || null);
       }
     } catch {
+      // Handled by realtime
+    }
+  }, [analysisId, getToken]);
+
+  const handleRetry = async () => {
+    if (isRetrying) return;
+    setIsRetrying(true);
+    setRetryError(null);
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          rerunAnalysisId: analysisId,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setRetryError(data?.error || `Retry failed (HTTP ${res.status}).`);
+        return;
+      }
+      setStatus("pending");
+      setCurrentStage("fetching");
+      setErrorMessage(null);
+      setAnalysis((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "pending",
+              stage: "fetching",
+              error_message: null,
+              updated_at: new Date().toISOString(),
+            }
+          : prev
+      );
       router.refresh();
+    } catch (err) {
+      setRetryError(err instanceof Error ? err.message : "Network error retrying analysis.");
     } finally {
       setIsRetrying(false);
     }
@@ -156,70 +192,57 @@ export function AnalysisProgressView({
     !!analysis?.updated_at &&
     now - new Date(analysis.updated_at).getTime() > 3 * 60 * 1000;
 
-  // Navigate to map when complete
+  // Transition to canvas view cleanly when complete (on the same /analysis/[id] route)
   useEffect(() => {
     if (status === "completed" || currentStage === "complete") {
       const timer = setTimeout(() => {
-        router.push(`/preview?id=${analysisId}`);
-      }, 1200);
+        router.refresh();
+      }, 800);
       return () => clearTimeout(timer);
     }
-  }, [status, currentStage, analysisId, router]);
+  }, [status, currentStage, router]);
 
-  // 1. Initial State Fetch & Fallback Poller (safety net if realtime socket disconnects)
+  // 1. One-shot initial state reconciliation on mount (no polling interval)
   useEffect(() => {
-    let mounted = true;
+    let active = true;
 
-    async function fetchLatest() {
+    (async () => {
       try {
         const token = await getToken();
+        if (!active) return;
         const res = await fetch(`/api/analyses/${analysisId}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         });
-        if (!res.ok) return;
+        if (!res.ok || !active) return;
         const data = await res.json();
-        if (data.analysis && mounted) {
+        if (active && data.analysis) {
           setAnalysis(data.analysis);
           setStatus(data.analysis.status);
           setCurrentStage(data.analysis.stage || "fetching");
-          if (data.analysis.commit_hash) {
-            setCommitHash(data.analysis.commit_hash);
-          }
-          if (data.analysis.error_message) {
-            setErrorMessage(data.analysis.error_message);
-          }
+          setCommitHash(data.analysis.commit_hash || null);
+          setErrorMessage(data.analysis.error_message || null);
         }
       } catch {
         // Handled by realtime
       }
-    }
-
-    fetchLatest();
-
-    // Secondary interval only if not completed or failed
-    const interval = setInterval(() => {
-      if (status !== "completed" && status !== "failed") {
-        fetchLatest();
-      }
-    }, 6000);
+    })();
 
     return () => {
-      mounted = false;
-      clearInterval(interval);
+      active = false;
     };
-  }, [analysisId, status, getToken]);
+  }, [analysisId, getToken]);
 
   // 2. Realtime Subscription: Driven by database trigger on public.analyses
   useEffect(() => {
+    let isSubscribed = true;
     let channel: ReturnType<typeof supabase.channel> | null = null;
     const supabase = createSupabaseClient(session || getToken);
 
     async function setupRealtime() {
       try {
         // Authenticate WebSocket connection for private channel
-        const token = await (session
-          ? session.getToken({ template: "supabase" })
-          : getToken());
+        const token = await (session ? session.getToken() : getToken());
+        if (!isSubscribed) return;
 
         if (token && supabase.realtime) {
           await supabase.realtime.setAuth(token);
@@ -239,17 +262,24 @@ export function AnalysisProgressView({
               if (payload.status) {
                 setStatus(payload.status);
               }
-              if (payload.error_message) {
-                setErrorMessage(payload.error_message);
+              if ("error_message" in payload) {
+                setErrorMessage(payload.error_message || null);
               }
               if (payload.commit_hash) {
                 setCommitHash(payload.commit_hash);
               }
+              if (payload.updated_at) {
+                setAnalysis((prev) =>
+                  prev ? { ...prev, updated_at: payload.updated_at } : prev
+                );
+              }
             }
           })
           .subscribe((subscribeStatus) => {
+            if (!isSubscribed) return;
             if (subscribeStatus === "SUBSCRIBED") {
               setIsRealtimeConnected(true);
+              void fetchLatest();
             } else if (
               subscribeStatus === "CLOSED" ||
               subscribeStatus === "CHANNEL_ERROR"
@@ -258,65 +288,65 @@ export function AnalysisProgressView({
             }
           });
       } catch {
-        setIsRealtimeConnected(false);
+        if (isSubscribed) {
+          setIsRealtimeConnected(false);
+        }
       }
     }
 
     setupRealtime();
 
     return () => {
+      isSubscribed = false;
       if (channel) {
         supabase.removeChannel(channel);
       }
     };
-  }, [analysisId, session, getToken]);
+  }, [analysisId, session, getToken, fetchLatest]);
 
   return (
-    <div className="min-h-screen bg-[#08090d] text-foreground flex flex-col font-times antialiased relative selection:bg-[#F64302] selection:text-white">
-      {/* Background Atmosphere Glow */}
+    <div className="min-h-screen bg-background text-foreground flex flex-col font-jetbrains antialiased relative selection:bg-primary selection:text-primary-foreground">
+      {/* Subtle monochrome grid */}
       <div
-        className="fixed inset-0 pointer-events-none z-0 opacity-40"
+        className="fixed inset-0 pointer-events-none z-0 opacity-35 dark:opacity-25"
         style={{
           backgroundImage: `
-            radial-gradient(ellipse 80% 50% at 50% -20%, rgba(246, 67, 2, 0.18), transparent 70%),
-            radial-gradient(circle at 100% 100%, rgba(246, 67, 2, 0.08), transparent 50%),
-            linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-            linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px)
+            linear-gradient(to right, var(--border) 1px, transparent 1px),
+            linear-gradient(to bottom, var(--border) 1px, transparent 1px)
           `,
-          backgroundSize: "100% 100%, 100% 100%, 36px 36px, 36px 36px",
+          backgroundSize: "36px 36px",
         }}
       />
 
       {/* Top Application Header */}
-      <header className="border-b border-white/10 bg-[#08090d]/85 backdrop-blur-xl sticky top-0 z-40 px-4 sm:px-6 py-3 flex items-center justify-between shadow-sm">
+      <header className="border-b border-border bg-card/85 backdrop-blur-xl sticky top-0 z-40 px-4 sm:px-6 py-3 flex items-center justify-between shadow-sm">
         <div className="flex items-center gap-3">
           <Link
             href="/workspace"
-            className="flex items-center gap-2 text-white/60 hover:text-white transition-colors text-xs font-mono group"
+            className="flex items-center gap-2 text-muted-foreground hover:text-foreground transition-colors text-xs font-mono group"
           >
             <ArrowLeft className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
-            <span className="font-times text-xs">Workspace</span>
+            <span>Workspace</span>
           </Link>
-          <span className="text-white/20 text-xs font-mono">/</span>
-          <span className="text-white font-times text-sm font-semibold">
+          <span className="text-muted-foreground/40 text-xs font-mono">/</span>
+          <span className="text-foreground text-xs sm:text-sm font-semibold">
             {repoName}
           </span>
         </div>
 
-        {/* Realtime Socket Status Indicator */}
-        <div className="flex items-center gap-2 font-mono text-[11px]">
+        {/* Realtime Socket Status Indicator & Theme Switcher */}
+        <div className="flex items-center gap-2.5 font-mono text-[11px]">
+          <ThemeToggle />
           <span
             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] ${
               isRealtimeConnected
-                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                : "bg-amber-500/10 border-amber-500/20 text-amber-400"
+                ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-700 dark:text-emerald-400"
+                : "bg-amber-500/10 border-amber-500/25 text-amber-700 dark:text-amber-400"
             }`}
           >
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                isRealtimeConnected
-                  ? "bg-emerald-400 animate-pulse"
-                  : "bg-amber-400"
+                isRealtimeConnected ? "bg-emerald-500" : "bg-amber-500"
               }`}
             />
             {isRealtimeConnected ? "REALTIME LIVE" : "CONNECTING"}
@@ -328,25 +358,25 @@ export function AnalysisProgressView({
       <main className="flex-1 w-full max-w-2xl mx-auto px-4 py-12 z-10 flex flex-col justify-center">
         {/* Repository Header Box */}
         <div className="mb-8 text-center sm:text-left">
-          <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/10 text-xs font-times text-white/70 mb-3">
-            <Radio className="w-3.5 h-3.5 text-[#F64302]" />
+          <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-secondary/60 border border-border text-xs text-muted-foreground mb-3">
+            <Radio className="w-3.5 h-3.5 text-primary" />
             <span>Pipeline Ingestion</span>
           </div>
 
-          <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-normal font-times mb-2">
+          <h1 className="text-xl sm:text-2xl font-bold text-foreground tracking-tight mb-2">
             {repoName}
           </h1>
 
-          <div className="flex flex-wrap items-center gap-3 text-xs text-white/50 font-mono">
+          <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 text-xs text-muted-foreground font-mono">
             {analysis?.branch && (
-              <span className="inline-flex items-center gap-1 bg-white/[0.04] px-2 py-0.5 rounded border border-white/10 text-white/70">
-                <GitBranch className="w-3 h-3 text-white/40" />
+              <span className="inline-flex items-center gap-1 bg-secondary px-2 py-0.5 rounded border border-border text-foreground">
+                <GitBranch className="w-3 h-3 text-muted-foreground" />
                 {analysis.branch}
               </span>
             )}
             {commitHash && (
-              <span className="inline-flex items-center gap-1 bg-white/[0.04] px-2 py-0.5 rounded border border-white/10 text-white/70">
-                <GitCommit className="w-3 h-3 text-[#F64302]" />
+              <span className="inline-flex items-center gap-1 bg-secondary px-2 py-0.5 rounded border border-border text-foreground">
+                <GitCommit className="w-3 h-3 text-primary" />
                 {commitHash.slice(0, 7)}
               </span>
             )}
@@ -355,7 +385,7 @@ export function AnalysisProgressView({
                 href={analysis.repository_url}
                 target="_blank"
                 rel="noreferrer"
-                className="hover:text-white transition-colors inline-flex items-center gap-1 underline underline-offset-2"
+                className="hover:text-primary transition-colors inline-flex items-center gap-1 underline underline-offset-2"
               >
                 GitHub <ExternalLink className="w-3 h-3" />
               </a>
@@ -365,13 +395,13 @@ export function AnalysisProgressView({
 
         {/* Stale Warning Alert */}
         {isStale && status !== "failed" && (
-          <div className="mb-6 p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 font-mono text-xs flex items-start gap-2.5 shadow-lg">
-            <Clock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div className="mb-6 p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-800 dark:text-amber-300 font-mono text-xs flex items-start gap-2.5 shadow-sm">
+            <Clock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
             <div>
-              <p className="font-semibold text-amber-200">
+              <p className="font-semibold">
                 Analysis appears stale
               </p>
-              <p className="text-amber-300/80 text-[11px] mt-0.5">
+              <p className="opacity-85 text-[11px] mt-0.5">
                 This run has remained in the same stage for more than 3 minutes.
                 The process may have stopped.
               </p>
@@ -380,7 +410,7 @@ export function AnalysisProgressView({
         )}
 
         {/* Pipeline Stepper Container */}
-        <div className="rounded-2xl border border-white/10 bg-[#0c0d14]/80 backdrop-blur-xl p-6 sm:p-8 shadow-2xl">
+        <div className="rounded-2xl border border-border bg-card/90 backdrop-blur-xl p-6 sm:p-8 shadow-sm dark:shadow-xl">
           <div className="space-y-6">
             {STAGES.map((stage, idx) => {
               const isCurrent =
@@ -400,7 +430,7 @@ export function AnalysisProgressView({
                   {idx < STAGES.length - 1 && (
                     <div
                       className={`absolute left-3.5 top-8 w-0.5 h-10 transition-colors ${
-                        isPassed ? "bg-emerald-500/50" : "bg-white/10"
+                        isPassed ? "bg-emerald-500/50" : "bg-border"
                       }`}
                     />
                   )}
@@ -408,19 +438,19 @@ export function AnalysisProgressView({
                   {/* Stage Icon Node */}
                   <div className="relative z-10 shrink-0">
                     {isPassed ? (
-                      <div className="w-7 h-7 rounded-full bg-emerald-500/15 border border-emerald-500/50 flex items-center justify-center text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.3)] transition-all">
+                      <div className="w-7 h-7 rounded-full bg-emerald-500/15 border border-emerald-500/50 flex items-center justify-center text-emerald-600 dark:text-emerald-400 transition-all">
                         <Check className="w-4 h-4 stroke-[2.5]" />
                       </div>
                     ) : isFailedStage ? (
-                      <div className="w-7 h-7 rounded-full bg-rose-500/20 border border-rose-500/50 flex items-center justify-center text-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.3)]">
+                      <div className="w-7 h-7 rounded-full bg-rose-500/20 border border-rose-500/50 flex items-center justify-center text-rose-600 dark:text-rose-400">
                         <AlertCircle className="w-4 h-4" />
                       </div>
                     ) : isCurrent ? (
-                      <div className="w-7 h-7 rounded-full bg-[#F64302]/20 border border-[#F64302]/60 flex items-center justify-center text-[#F64302] shadow-[0_0_14px_rgba(246,67,2,0.4)] animate-pulse">
+                      <div className="w-7 h-7 rounded-full bg-primary/15 border border-primary/60 flex items-center justify-center text-primary">
                         <Loader2 className="w-4 h-4 animate-spin" />
                       </div>
                     ) : (
-                      <div className="w-7 h-7 rounded-full bg-white/[0.03] border border-white/10 flex items-center justify-center text-white/30 text-xs font-mono">
+                      <div className="w-7 h-7 rounded-full bg-secondary border border-border flex items-center justify-center text-muted-foreground text-xs font-mono">
                         {idx + 1}
                       </div>
                     )}
@@ -430,14 +460,14 @@ export function AnalysisProgressView({
                   <div className="flex-1 pt-0.5">
                     <div className="flex items-center justify-between gap-2">
                       <span
-                        className={`text-sm sm:text-base font-times font-semibold tracking-normal transition-colors ${
+                        className={`text-sm font-semibold tracking-tight transition-colors ${
                           isPassed
-                            ? "text-emerald-300"
+                            ? "text-emerald-700 dark:text-emerald-300"
                             : isFailedStage
-                            ? "text-rose-400"
+                            ? "text-rose-700 dark:text-rose-400"
                             : isCurrent
-                            ? "text-white"
-                            : "text-white/40"
+                            ? "text-foreground"
+                            : "text-muted-foreground"
                         }`}
                       >
                         {stage.label}
@@ -445,28 +475,28 @@ export function AnalysisProgressView({
 
                       {/* State Pills */}
                       {isPassed && (
-                        <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2 py-0.5 rounded-full flex items-center gap-1">
                           <Check className="w-2.5 h-2.5 stroke-[3]" />
                           <span>Passed</span>
                         </span>
                       )}
                       {isCurrent && (
-                        <span className="text-[10px] font-mono text-[#F64302] bg-[#F64302]/10 border border-[#F64302]/20 px-2 py-0.5 rounded-full animate-pulse">
+                        <span className="text-[10px] font-mono text-primary bg-primary/10 border border-primary/25 px-2 py-0.5 rounded-full">
                           Running
                         </span>
                       )}
                       {isFailedStage && (
-                        <span className="text-[10px] font-mono text-rose-400 bg-rose-500/10 border border-rose-500/20 px-2 py-0.5 rounded-full">
+                        <span className="text-[10px] font-mono text-rose-700 dark:text-rose-400 bg-rose-500/10 border border-rose-500/25 px-2 py-0.5 rounded-full">
                           Failed
                         </span>
                       )}
                     </div>
 
                     <p
-                      className={`text-xs font-times mt-0.5 transition-colors ${
+                      className={`text-xs mt-0.5 transition-colors ${
                         isCurrent || isPassed
-                          ? "text-white/60"
-                          : "text-white/30"
+                          ? "text-muted-foreground"
+                          : "text-muted-foreground/60"
                       }`}
                     >
                       {stage.description}
@@ -479,28 +509,35 @@ export function AnalysisProgressView({
 
           {/* Failure Diagnostic Box */}
           {status === "failed" && (
-            <div className="mt-8 pt-6 border-t border-white/10">
-              <div className="rounded-xl bg-rose-950/30 border border-rose-500/30 p-4 text-rose-300 font-mono text-xs shadow-inner">
-                <div className="flex items-center gap-2 font-semibold text-rose-200 mb-1">
-                  <AlertCircle className="w-4 h-4 text-rose-400" />
-                  <span>Pipeline failed in stage: `{currentStage}`</span>
+            <div className="mt-8 pt-6 border-t border-border">
+              <div className="rounded-xl bg-rose-500/10 border border-rose-500/25 p-4 text-rose-800 dark:text-rose-300 font-mono text-xs">
+                <div className="flex items-center gap-2 font-semibold mb-1">
+                  <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+                  <span>Pipeline failed in stage: {currentStage}</span>
                 </div>
-                <p className="text-rose-300/90 text-xs mt-1.5 leading-relaxed pl-6">
+                <p className="opacity-90 text-xs mt-1.5 leading-relaxed pl-6">
                   {errorMessage || "An unexpected error interrupted this run."}
                 </p>
               </div>
 
-              <div className="mt-5 flex items-center justify-between gap-3 font-times">
+              {retryError && (
+                <div className="mt-3 rounded-lg bg-rose-500/10 border border-rose-500/25 px-3 py-2 text-xs font-mono text-rose-700 dark:text-rose-300">
+                  {retryError}
+                </div>
+              )}
+
+              <div className="mt-5 flex items-center justify-between gap-3">
                 <Link
                   href="/workspace"
-                  className="px-4 py-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-white font-times text-xs transition-colors"
+                  className="px-4 py-2 rounded-xl bg-secondary hover:bg-secondary/80 border border-border text-foreground text-xs transition-colors"
                 >
                   Return to Dashboard
                 </Link>
                 <button
+                  type="button"
                   onClick={handleRetry}
                   disabled={isRetrying}
-                  className="px-4 py-2 rounded-xl bg-[#F64302] hover:bg-[#F64302]/90 disabled:opacity-50 text-white font-times text-xs font-semibold transition-all shadow-md flex items-center gap-1.5"
+                  className="px-4 py-2 rounded-xl bg-primary hover:bg-primary/90 disabled:opacity-50 text-primary-foreground text-xs font-semibold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
                 >
                   {isRetrying && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   <span>{isRetrying ? "Retrying..." : "Retry Analysis"}</span>
@@ -511,27 +548,28 @@ export function AnalysisProgressView({
 
           {/* Success Redirect Notice */}
           {status === "completed" && (
-            <div className="mt-8 pt-6 border-t border-white/10 flex items-center justify-between font-times">
-              <span className="text-sm font-times text-emerald-400 flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                Graph generated. Redirecting to map...
+            <div className="mt-8 pt-6 border-t border-border flex items-center justify-between">
+              <span className="text-xs sm:text-sm text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4" />
+                Graph generated. Opening map...
               </span>
-              <Link
-                href={`/preview?id=${analysisId}`}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 font-times text-xs font-semibold transition-all"
+              <button
+                type="button"
+                onClick={() => router.refresh()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition-all cursor-pointer"
               >
                 Open Map <ChevronRight className="w-3.5 h-3.5" />
-              </Link>
+              </button>
             </div>
           )}
         </div>
 
         {/* Monospace Footer Info */}
-        <div className="mt-6 flex items-center justify-between text-[11px] text-white/30 font-mono px-2">
-          <span>Analysis ID: `{analysisId}`</span>
+        <div className="mt-6 flex items-center justify-between text-[11px] text-muted-foreground font-mono px-2">
+          <span>Analysis ID: {analysisId}</span>
           <span className="flex items-center gap-1">
             <Terminal className="w-3 h-3" />
-            Phase 7 Engine
+            CodoGraph Pipeline
           </span>
         </div>
       </main>

@@ -4,7 +4,7 @@
  * Invariant: Graph calculations are pure functions over a file list and an edge list.
  * Zero network requests, zero database calls, standalone and deterministic.
  */
-import type { ParsedFile, ParsedEdge } from '../parser/types.ts';
+import type { ParsedFile, ParsedEdge, ExtractedRoute } from '../parser/types.ts';
 import { categorizeFiles, type FileCategory } from './taxonomy.ts';
 
 export interface RepositorySummary {
@@ -88,15 +88,25 @@ export function computeRepositorySummary(
   repositoryName: string,
   adapter: string,
   files: ParsedFile[],
-  edges: ParsedEdge[]
+  edges: ParsedEdge[],
+  routes?: ExtractedRoute[]
 ): RepositorySummary {
   const filesCount = files.length;
   const importsCount = edges.length;
 
-  // Exact or absent convention: count files explicitly designated as routes or pages
-  const routesCount = files.filter(
-    (f) => f.role === 'route' || f.role === 'page' || f.role === 'route_handler'
-  ).length;
+  // Exact or absent convention: prefer extracted Phase 8 routes array when supplied
+  const routeRoles = new Set([
+    'Page routes',
+    'API endpoints',
+    'Controllers',
+    'route',
+    'page',
+    'route_handler',
+  ]);
+  const routesCount =
+    routes !== undefined
+      ? routes.length
+      : files.filter((f) => f.role !== null && routeRoles.has(f.role)).length;
 
   // Unidentified files: no convention could identify an architectural role
   const unidentifiedCount = files.filter(
@@ -271,6 +281,7 @@ export function detectCyclesIterative(
 
   for (const startNode of sortedFiles) {
     if (visited.has(startNode)) continue;
+    visited.add(startNode);
 
     // Explicit stack: [node, edgeIndex]
     const stack: Array<{ u: string; edgeIdx: number }> = [
@@ -330,19 +341,34 @@ export function detectCyclesIterative(
   return cycles;
 }
 
+const FRAMEWORK_REACHED_ROLES = new Set([
+  'Page routes',
+  'API endpoints',
+  'Server actions',
+  'Layouts',
+  'Loading & error UI',
+  'Middleware',
+  'Metadata files',
+  'Instrumentation',
+  'Config',
+  'Config files',
+  'Tests',
+  'Controllers',
+  'Gateways',
+  'page',
+  'route',
+  'route_handler',
+  'layout',
+  'middleware',
+  'config',
+]);
+
 /**
  * Decides whether a file is reached via framework conventions (pages, routes, layouts, config, etc.)
  * rather than internal import statements.
  */
 export function isFrameworkReachedFile(file: ParsedFile): boolean {
-  if (
-    file.role === 'page' ||
-    file.role === 'route' ||
-    file.role === 'route_handler' ||
-    file.role === 'layout' ||
-    file.role === 'middleware' ||
-    file.role === 'config'
-  ) {
+  if (file.role && FRAMEWORK_REACHED_ROLES.has(file.role)) {
     return true;
   }
 
@@ -362,7 +388,7 @@ export function isFrameworkReachedFile(file: ParsedFile): boolean {
     return true;
   }
 
-  // Layouts, error boundaries, middleware
+  // Layouts, error boundaries, middleware, proxy, metadata, instrumentation
   if (
     base === 'layout.tsx' ||
     base === 'layout.ts' ||
@@ -370,11 +396,37 @@ export function isFrameworkReachedFile(file: ParsedFile): boolean {
     base === 'layout.js' ||
     base === 'middleware.ts' ||
     base === 'middleware.js' ||
+    base === 'proxy.ts' ||
+    base === 'proxy.js' ||
     base === 'loading.tsx' ||
+    base === 'loading.ts' ||
+    base === 'loading.jsx' ||
+    base === 'loading.js' ||
     base === 'error.tsx' ||
+    base === 'error.ts' ||
+    base === 'error.jsx' ||
+    base === 'error.js' ||
+    base === 'global-error.tsx' ||
     base === 'not-found.tsx' ||
     base === 'template.tsx' ||
-    base === 'default.tsx'
+    base === 'default.tsx' ||
+    base === 'sitemap.ts' ||
+    base === 'robots.ts' ||
+    base === 'manifest.ts' ||
+    base === 'opengraph-image.tsx' ||
+    base === 'twitter-image.tsx' ||
+    base === 'icon.tsx' ||
+    base === 'apple-icon.tsx' ||
+    base === 'instrumentation.ts' ||
+    base === 'instrumentation-client.ts'
+  ) {
+    return true;
+  }
+
+  // Test files (executed directly by test runners)
+  if (
+    /(?:\.test|\.spec|_test|_spec)\.(ts|tsx|js|jsx|mts|cts)$/i.test(base) ||
+    /(?:^|\/)__(?:tests|mocks)__\//.test(p)
   ) {
     return true;
   }

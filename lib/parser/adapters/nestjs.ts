@@ -104,39 +104,40 @@ function extractControllerPrefix(decorator: Decorator): string | null {
 }
 
 /**
- * Extracts all HTTP decorators from a method declaration.
+ * Extracts all HTTP decorators from a method declaration with their 1-based line number.
  */
 function getMethodHttpDecorators(
   method: MethodDeclaration
-): { httpMethod: string; subPath: string | null }[] {
-  const results: { httpMethod: string; subPath: string | null }[] = [];
+): { httpMethod: string; subPath: string | null; line: number }[] {
+  const results: { httpMethod: string; subPath: string | null; line: number }[] = [];
 
   for (const decorator of method.getDecorators()) {
     const name = decorator.getName();
     const httpMethod = NEST_HTTP_METHODS.get(name);
     if (!httpMethod) continue;
 
+    const line = decorator.getStartLineNumber();
     const args = decorator.getArguments();
     if (args.length === 0) {
-      results.push({ httpMethod, subPath: '' });
+      results.push({ httpMethod, subPath: '', line });
       continue;
     }
 
     const firstArg = args[0];
     if (Node.isStringLiteral(firstArg)) {
-      results.push({ httpMethod, subPath: firstArg.getLiteralValue() });
+      results.push({ httpMethod, subPath: firstArg.getLiteralValue(), line });
     } else if (Node.isArrayLiteralExpression(firstArg)) {
       // Multiple paths: @Get(['', 'all'])
       for (const elem of firstArg.getElements()) {
         if (Node.isStringLiteral(elem)) {
-          results.push({ httpMethod, subPath: elem.getLiteralValue() });
+          results.push({ httpMethod, subPath: elem.getLiteralValue(), line });
         } else {
-          results.push({ httpMethod, subPath: null });
+          results.push({ httpMethod, subPath: null, line });
         }
       }
     } else {
       // Dynamic argument
-      results.push({ httpMethod, subPath: null });
+      results.push({ httpMethod, subPath: null, line });
     }
   }
 
@@ -266,7 +267,7 @@ export const nestjsAdapter: FrameworkAdapter = {
         for (const method of classDecl.getMethods()) {
           const httpDecorators = getMethodHttpDecorators(method);
 
-          for (const { httpMethod, subPath } of httpDecorators) {
+          for (const { httpMethod, subPath, line } of httpDecorators) {
             // Constraint: If subPath is dynamic / unresolvable, emit nothing for this method
             if (subPath === null) continue;
 
@@ -275,6 +276,7 @@ export const nestjsAdapter: FrameworkAdapter = {
               method: httpMethod,
               pattern,
               filePath: file.path,
+              line,
               framework: 'nestjs',
             });
           }

@@ -19,10 +19,11 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
  * Never call this in a client component or share one instance across requests.
  */
 export async function createSupabaseServerClient(): Promise<SupabaseClient> {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey =
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey = (
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  )?.trim();
 
   if (!supabaseUrl || !supabaseKey) {
     throw new Error(
@@ -32,7 +33,7 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient> {
   }
 
   // Capture the Clerk auth state once for the current request
-  const clerkAuth = await auth();
+  const clerkAuth = await auth({ treatPendingAsSignedOut: false });
 
   return createClient(supabaseUrl, supabaseKey, {
     auth: {
@@ -40,14 +41,9 @@ export async function createSupabaseServerClient(): Promise<SupabaseClient> {
       autoRefreshToken: false,
       detectSessionInUrl: false,
     },
-    // Native third-party auth integration: Supabase calls this whenever it
-    // needs to authorize a request. The returned JWT carries sub and org claims
-    // that Postgres RLS policies can read via (auth.jwt() ->> 'org_id').
+    // Native third-party auth integration: Supabase forwards the Clerk session
+    // token carrying sub, role ('authenticated'), and active org claims (o.id / org_id).
     accessToken: async () => {
-      try {
-        const token = await clerkAuth.getToken({ template: 'supabase' });
-        if (token) return token;
-      } catch {}
       return clerkAuth.getToken();
     },
   });

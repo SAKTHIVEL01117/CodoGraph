@@ -1,21 +1,30 @@
 /**
- * CodoGraph — Phase 7: Pipeline Database Storage Layer.
+ * CodoGraph — Phase 7 & 8: Pipeline Database Storage Layer (Supabase HTTPS).
  *
  * Implements:
- * 1. "One analysis per repository": Looks up existing completed analysis before re-running.
- * 2. Stage transitions: Updates 'analyses.stage' and 'analyses.status'.
- * 3. Atomic/Batch persistence of files, edges, insights, and file roles.
- * 4. Error state tracking: Writes failure reason and stage on catch.
- * 5. Full RLS compliance with session claims.
+ * 1. User-facing queries & deletes through Clerk-authenticated Supabase client (RLS enforced, NO WHERE org_id = ...).
+ * 2. Background worker stage transitions and atomic batch storage through admin HTTPS client
+ *    (strictly scoped with .eq('id', analysisId).eq('org_id', orgId)).
+ * 3. Full pagination (.range) on files, edges, file_roles, and routes (no 1000-row PostgREST truncation).
+ * 4. "One analysis per repository" lookup and in-place Re-run reset.
  */
 import path from 'node:path';
-import { Client } from 'pg';
-import type { ParserResult, ParsedFile, ParsedEdge, CoverageReport, ExtractedRoute } from '../parser/types.ts';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createSupabaseAdminClient } from '../supabase/admin.ts';
+import type {
+  ParserResult,
+  ParsedFile,
+  ParsedEdge,
+  CoverageReport,
+  ExtractedRoute,
+  EdgeKind,
+} from '../parser/types.ts';
 import type { CodebaseInsight } from '../canvas/metrics.ts';
 
-const DB_URL =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:gpsv%40280907sv@db.xiimblxgfdirkqhbekfn.supabase.co:5432/postgres';
+export const ANALYSIS_COLUMNS =
+  'id, org_id, project_id, repository_url, branch, commit_hash, status, stage, error_message, summary, created_at, updated_at';
+
+const POSTGREST_PAGE_SIZE = 1000;
 
 export type PipelineStage =
   | 'fetching'
@@ -40,337 +49,621 @@ export interface AnalysisRecord {
   updated_at: string;
 }
 
-/**
- * Creates and connects a pg Client configured with the organization's RLS session claims.
- */
-async function getAuthenticatedClient(orgId: string, userId?: string | null): Promise<Client> {
-  const client = new Client({
-    connectionString: DB_URL,
-    ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000,
-    keepAlive: true,
-  });
-
-  await client.connect();
-
-  // Set session claims so RLS functions (requesting_org_id()) evaluate correctly
-  await client.query("SET LOCAL ROLE 'authenticated';");
-  await client.query(`SELECT set_config('request.jwt.claims', $1, true);`, [
-    JSON.stringify({ sub: userId || 'system', org_id: orgId }),
-  ]);
-
-  return client;
-}
-
-/**
- * Fetches a single analysis record by ID.
- */
-export async function getAnalysisById(
-  analysisId: string,
-  orgId?: string
-): Promise<AnalysisRecord | null> {
-  const client = new Client({
-    connectionString: DB_URL,
-    ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000,
-    keepAlive: true,
-  });
-
-  await client.connect();
-  try {
-    let query = `SELECT * FROM public.analyses WHERE id = $1`;
-    const params: unknown[] = [analysisId];
-    if (orgId) {
-      query += ` AND org_id = $2`;
-      params.push(orgId);
-    }
-    const res = await client.query(query, params);
-    if (res.rows.length > 0) {
-      return res.rows[0] as AnalysisRecord;
-    }
-    return null;
-  } finally {
-    await client.end();
-  }
-}
-
-/**
- * Fetches all analysis records for an organization, ordered latest first.
- */
-export async function getAllAnalysesForOrg(orgId: string): Promise<AnalysisRecord[]> {
-  const client = await getAuthenticatedClient(orgId);
-  try {
-    const res = await client.query(
-      `SELECT * FROM public.analyses
-       WHERE org_id = $1
-       ORDER BY created_at DESC;`,
-      [orgId]
-    );
-    return res.rows as AnalysisRecord[];
-  } finally {
-    await client.end();
-  }
-}
-
-/**
- * Deletes an analysis record and all cascading dependencies (files, edges, roles, insights).
- */
-export async function deleteAnalysis(analysisId: string, orgId?: string): Promise<boolean> {
-  const client = new Client({
-    connectionString: DB_URL,
-    ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000,
-    keepAlive: true,
-  });
-
-  await client.connect();
-  try {
-    let query = `DELETE FROM public.analyses WHERE id = $1`;
-    const params: unknown[] = [analysisId];
-    if (orgId) {
-      query += ` AND org_id = $2`;
-      params.push(orgId);
-    }
-    const res = await client.query(query, params);
-    return (res.rowCount ?? 0) > 0;
-  } finally {
-    await client.end();
-  }
-}
-
 export interface FullAnalysisGraph {
   analysis: AnalysisRecord;
   result: ParserResult;
 }
 
-/**
- * Loads the complete parsed graph (files, edges, roles, coverage) for an analysis.
- */
-export async function getAnalysisGraph(
-  analysisId: string,
-  orgId?: string
-): Promise<FullAnalysisGraph | null> {
-  const analysis = await getAnalysisById(analysisId, orgId);
-  if (!analysis) return null;
+async function fetchAllRows<T>(
+  fetchPage: (
+    from: number,
+    to: number
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
+): Promise<T[]> {
+  const all: T[] = [];
+  let from = 0;
 
-  const client = new Client({
-    connectionString: DB_URL,
-    ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 30000,
-    keepAlive: true,
-  });
+  while (true) {
+    const to = from + POSTGREST_PAGE_SIZE - 1;
+    const { data, error } = await fetchPage(from, to);
 
-  await client.connect();
-  try {
-    const filesRes = await client.query(
-      `SELECT path, folder, extension, lines, size_bytes, content_hash, fan_in, fan_out, role
-       FROM public.files
-       WHERE analysis_id = $1
-       ORDER BY path ASC;`,
-      [analysisId]
-    );
+    if (error) {
+      throw new Error(`[CodoGraph Storage] Query pagination failed: ${error.message}`);
+    }
 
-    const edgesRes = await client.query(
-      `SELECT source_path, target_path, kind, specifier
-       FROM public.edges
-       WHERE analysis_id = $1
-       ORDER BY id ASC;`,
-      [analysisId]
-    );
+    const rows = data ?? [];
+    all.push(...rows);
 
-    const repoClean = analysis.repository_url
-      ? analysis.repository_url.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '')
-      : 'Repository';
+    if (rows.length < POSTGREST_PAGE_SIZE) {
+      break;
+    }
 
-    const files: ParsedFile[] = filesRes.rows.map((f) => ({
-      path: f.path,
-      folder: f.folder,
-      extension: f.extension || (f.path.includes('.') ? '.' + f.path.split('.').pop() : ''),
-      lines: Number(f.lines || 0),
-      sizeBytes: Number(f.size_bytes || 0),
-      contentHash: f.content_hash || '',
-      isSourceCode: true,
-      fanIn: Number(f.fan_in || 0),
-      fanOut: Number(f.fan_out || 0),
-      role: f.role || null,
-    }));
+    from += POSTGREST_PAGE_SIZE;
+  }
 
-    const edges: ParsedEdge[] = edgesRes.rows.map((e) => ({
-      sourcePath: e.source_path,
-      targetPath: e.target_path,
-      kind: e.kind,
-      specifier: e.specifier,
-    }));
+  return all;
+}
 
-    const folders = Array.from(new Set(files.map((f) => f.folder))).sort();
-
-    const summary = (analysis.summary || {}) as Record<string, unknown>;
-
-    // Load extracted routes (Phase 8)
-    let routes: ExtractedRoute[] = [];
-    try {
-      const routesRes = await client.query(
-        `SELECT r.method, r.pattern, r.framework, f.path as file_path
-         FROM public.routes r
-         LEFT JOIN public.files f ON r.file_id = f.id
-         WHERE r.analysis_id = $1
-         ORDER BY r.pattern ASC, r.method ASC;`,
-        [analysisId]
+async function insertInChunks(
+  admin: SupabaseClient,
+  table: string,
+  rows: Record<string, unknown>[],
+  chunkSize = 200
+): Promise<void> {
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const { error } = await admin.from(table).insert(chunk);
+    if (error) {
+      throw new Error(
+        `[CodoGraph Storage] Failed inserting batch into ${table}: ${error.message}`
       );
-      routes = routesRes.rows.map((r) => ({
-        method: r.method,
-        pattern: r.pattern,
-        filePath: r.file_path || '',
-        framework: r.framework || undefined,
-      }));
-    } catch {
-      routes = (summary.routes as ExtractedRoute[]) || [];
     }
-
-    if (routes.length === 0 && Array.isArray(summary.routes)) {
-      routes = summary.routes as ExtractedRoute[];
-    }
-
-    const coverage: CoverageReport = (summary.coverage as CoverageReport) || {
-      filesFound: files.length,
-      filesParsed: files.length,
-      filesSkipped: 0,
-      skipReasons: {},
-      skippedFiles: [],
-      importsTotal: edges.length,
-      importsResolvedInternal: edges.length,
-      importsExternal: 0,
-      importsExcluded: 0,
-      importsUnresolved: 0,
-      reExportsTotal: 0,
-      reExportsResolvedInternal: 0,
-      dynamicImportsTotal: 0,
-      dynamicImportsResolvedInternal: 0,
-      unresolvedDetails: [],
-    };
-
-    const result: ParserResult = {
-      repositoryRoot: (summary.repositoryRoot as string) || repoClean,
-      timestamp: analysis.updated_at || analysis.created_at || new Date().toISOString(),
-      adapter: (summary.adapter as string) || 'standard',
-      files,
-      edges,
-      folders,
-      coverage,
-      routes,
-    };
-
-    return {
-      analysis,
-      result,
-    };
-  } finally {
-    await client.end();
   }
 }
 
+// =============================================================================
+// 1. USER-FACING RLS FUNCTIONS (Clerk JWT forwarded via createSupabaseServerClient)
+//    Invariant: Zero application-level org_id filters on SELECT / UPDATE / DELETE.
+// =============================================================================
+
 /**
- * Checks if a completed analysis already exists for this repository within the organization.
- * Constraint: "One analysis per repository. Submitting a URL that has already been
- * analysed does not create a second one — it takes you to the existing analysis."
+ * Fetches all analysis records visible to the caller's active organization via RLS.
+ */
+export async function getAllAnalysesForOrg(
+  supabase: SupabaseClient,
+  limit = 100
+): Promise<AnalysisRecord[]> {
+  const { data, error } = await supabase
+    .from('analyses')
+    .select(ANALYSIS_COLUMNS)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`[CodoGraph Storage] Failed to list analyses: ${error.message}`);
+  }
+
+  return (data ?? []) as AnalysisRecord[];
+}
+
+/**
+ * Fetches a single analysis record by ID through PostgreSQL RLS.
+ */
+export async function getAnalysisById(
+  supabase: SupabaseClient,
+  analysisId: string
+): Promise<AnalysisRecord | null> {
+  const { data, error } = await supabase
+    .from('analyses')
+    .select(ANALYSIS_COLUMNS)
+    .eq('id', analysisId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to fetch analysis ${analysisId}: ${error.message}`
+    );
+  }
+
+  return (data as AnalysisRecord | null) ?? null;
+}
+
+/**
+ * Checks if any analysis already exists for a canonical repository URL in the caller's org.
+ * Enforces "One analysis per repository" invariant under RLS.
  */
 export async function findExistingAnalysis(
-  orgId: string,
+  supabase: SupabaseClient,
   canonicalUrl: string
 ): Promise<AnalysisRecord | null> {
-  const client = await getAuthenticatedClient(orgId);
-  try {
-    const res = await client.query(
-      `SELECT * FROM public.analyses
-       WHERE org_id = $1 AND repository_url = $2 AND status = 'completed'
-       ORDER BY created_at DESC
-       LIMIT 1;`,
-      [orgId, canonicalUrl]
-    );
+  const { data, error } = await supabase
+    .from('analyses')
+    .select(ANALYSIS_COLUMNS)
+    .eq('repository_url', canonicalUrl)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    if (res.rows.length > 0) {
-      return res.rows[0] as AnalysisRecord;
-    }
-    return null;
-  } finally {
-    await client.end();
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to look up existing analysis for ${canonicalUrl}: ${error.message}`
+    );
   }
+
+  return (data as AnalysisRecord | null) ?? null;
 }
 
 /**
- * Finds or creates a project record, then inserts a new pending analysis row.
+ * Finds or creates a project record, then inserts a new pending analysis row under RLS.
  */
 export async function createPendingAnalysis(
+  supabase: SupabaseClient,
   orgId: string,
   canonicalUrl: string,
   repoName: string,
-  branch = 'main',
-  userId?: string | null
+  branch = 'main'
 ): Promise<AnalysisRecord> {
-  const client = await getAuthenticatedClient(orgId, userId);
-  try {
-    // 1. Find or create project
-    const projRes = await client.query(
-      `SELECT id FROM public.projects WHERE org_id = $1 AND repository_url = $2 LIMIT 1;`,
-      [orgId, canonicalUrl]
-    );
+  const { data: existingProj, error: projSelectErr } = await supabase
+    .from('projects')
+    .select('id')
+    .eq('repository_url', canonicalUrl)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-    let projectId: string;
-    if (projRes.rows.length > 0) {
-      projectId = projRes.rows[0].id;
-    } else {
-      const newProj = await client.query(
-        `INSERT INTO public.projects (org_id, name, repository_url, default_branch)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id;`,
-        [orgId, repoName, canonicalUrl, branch]
+  if (projSelectErr) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to query project for ${canonicalUrl}: ${projSelectErr.message}`
+    );
+  }
+
+  let projectId: string;
+  if (existingProj?.id) {
+    projectId = existingProj.id as string;
+  } else {
+    const { data: newProj, error: projInsertErr } = await supabase
+      .from('projects')
+      .insert({
+        org_id: orgId,
+        name: repoName,
+        repository_url: canonicalUrl,
+        default_branch: branch,
+      })
+      .select('id')
+      .single();
+
+    if (projInsertErr || !newProj?.id) {
+      throw new Error(
+        `[CodoGraph Storage] Failed to create project for ${canonicalUrl}: ${
+          projInsertErr?.message || 'Unknown error'
+        }`
       );
-      projectId = newProj.rows[0].id;
     }
 
-    // 2. Insert new analysis in 'pending' status
-    const analysisRes = await client.query(
-      `INSERT INTO public.analyses (
-         org_id, project_id, repository_url, branch, status, stage, error_message, summary
-       )
-       VALUES ($1, $2, $3, $4, 'pending', 'fetching', NULL, '{}'::jsonb)
-       RETURNING *;`,
-      [orgId, projectId, canonicalUrl, branch]
-    );
-
-    return analysisRes.rows[0] as AnalysisRecord;
-  } finally {
-    await client.end();
+    projectId = newProj.id as string;
   }
+
+  const { data: analysis, error: analysisErr } = await supabase
+    .from('analyses')
+    .insert({
+      org_id: orgId,
+      project_id: projectId,
+      repository_url: canonicalUrl,
+      branch,
+      status: 'pending',
+      stage: 'fetching',
+      error_message: null,
+      summary: {},
+    })
+    .select(ANALYSIS_COLUMNS)
+    .single();
+
+  if (analysisErr || !analysis) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to create pending analysis: ${
+        analysisErr?.message || 'Unknown error'
+      }`
+    );
+  }
+
+  return analysis as AnalysisRecord;
 }
 
 /**
- * Updates the stage and status of an active analysis.
- * Automatically triggers the database broadcast for live progress.
+ * Resets an existing analysis record in-place under RLS to prepare for a Re-run.
+ */
+export async function prepareAnalysisForRerun(
+  supabase: SupabaseClient,
+  analysisId: string,
+  branch?: string
+): Promise<AnalysisRecord> {
+  const updatePayload: Record<string, unknown> = {
+    status: 'pending',
+    stage: 'fetching',
+    error_message: null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (branch && branch.trim() !== '') {
+    updatePayload.branch = branch.trim();
+  }
+
+  const { data, error } = await supabase
+    .from('analyses')
+    .update(updatePayload)
+    .eq('id', analysisId)
+    .select(ANALYSIS_COLUMNS)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to reset analysis ${analysisId} for re-run: ${error.message}`
+    );
+  }
+
+  if (!data) {
+    throw new Error(`Analysis ${analysisId} not found or access denied.`);
+  }
+
+  return data as AnalysisRecord;
+}
+
+/**
+ * Deletes an analysis record via RLS (cascading to files, edges, roles, routes, insights).
+ */
+export async function deleteAnalysis(
+  supabase: SupabaseClient,
+  analysisId: string
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('analyses')
+    .delete()
+    .eq('id', analysisId)
+    .select('id');
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to delete analysis ${analysisId}: ${error.message}`
+    );
+  }
+
+  return Array.isArray(data) && data.length > 0;
+}
+
+interface StoredFileRow {
+  id: string;
+  path: string;
+  folder: string;
+  extension: string | null;
+  lines: number | null;
+  size_bytes: number | null;
+  content_hash: string | null;
+  fan_in: number | null;
+  fan_out: number | null;
+  role: string | null;
+}
+
+interface StoredEdgeRow {
+  id: string;
+  source_path: string;
+  target_path: string;
+  kind: string;
+  specifier: string | null;
+}
+
+interface StoredFileRoleRow {
+  id: string;
+  file_path: string;
+  role: string;
+}
+
+interface StoredRouteRow {
+  id: string;
+  file_id: string | null;
+  method: string;
+  pattern: string;
+  line: number | null;
+  framework: string | null;
+}
+
+/**
+ * Loads the complete parsed graph (files, edges, merged roles, routes, coverage) via RLS.
+ * Paginates cleanly past PostgREST's 1,000-row default limit.
+ */
+export async function getAnalysisGraph(
+  supabase: SupabaseClient,
+  analysisId: string
+): Promise<FullAnalysisGraph | null> {
+  const analysis = await getAnalysisById(supabase, analysisId);
+  if (!analysis) return null;
+
+  const [fileRows, edgeRows, roleRows, routeRows] = await Promise.all([
+    fetchAllRows<StoredFileRow>((from, to) =>
+      supabase
+        .from('files')
+        .select('id, path, folder, extension, lines, size_bytes, content_hash, fan_in, fan_out, role')
+        .eq('analysis_id', analysisId)
+        .order('path', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<StoredEdgeRow>((from, to) =>
+      supabase
+        .from('edges')
+        .select('id, source_path, target_path, kind, specifier')
+        .eq('analysis_id', analysisId)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<StoredFileRoleRow>((from, to) =>
+      supabase
+        .from('file_roles')
+        .select('id, file_path, role')
+        .eq('analysis_id', analysisId)
+        .order('file_path', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllRows<StoredRouteRow>((from, to) =>
+      supabase
+        .from('routes')
+        .select('id, file_id, method, pattern, line, framework')
+        .eq('analysis_id', analysisId)
+        .order('pattern', { ascending: true })
+        .order('method', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+  ]);
+
+  const roleByPath = new Map<string, string>();
+  for (const r of roleRows) {
+    if (r.file_path && r.role) {
+      roleByPath.set(r.file_path, r.role);
+    }
+  }
+
+  const fileIdToPath = new Map<string, string>();
+  for (const f of fileRows) {
+    fileIdToPath.set(f.id, f.path);
+  }
+
+  const files: ParsedFile[] = fileRows.map((f) => ({
+    path: f.path,
+    folder: f.folder,
+    extension: f.extension || (f.path.includes('.') ? '.' + f.path.split('.').pop() : ''),
+    lines: Number(f.lines || 0),
+    sizeBytes: Number(f.size_bytes || 0),
+    contentHash: f.content_hash || '',
+    isSourceCode: true,
+    fanIn: Number(f.fan_in || 0),
+    fanOut: Number(f.fan_out || 0),
+    role: f.role ?? roleByPath.get(f.path) ?? null,
+  }));
+
+  const edges: ParsedEdge[] = edgeRows.map((e) => ({
+    sourcePath: e.source_path,
+    targetPath: e.target_path,
+    kind: (e.kind as EdgeKind) || 'import',
+    specifier: e.specifier || '',
+  }));
+
+  const folders = Array.from(new Set(files.map((f) => f.folder))).sort();
+
+  const summary = (
+    analysis.summary && typeof analysis.summary === 'object' ? analysis.summary : {}
+  ) as Record<string, unknown>;
+
+  const summaryLineMap = new Map<string, number>();
+  if (Array.isArray(summary.routes)) {
+    for (const sr of summary.routes as ExtractedRoute[]) {
+      if (typeof sr.line === 'number') {
+        summaryLineMap.set(`${sr.method}|${sr.pattern}|${sr.filePath}`, sr.line);
+      }
+    }
+  }
+
+  let routes: ExtractedRoute[] = routeRows.map((r) => {
+    const filePath = r.file_id ? (fileIdToPath.get(r.file_id) ?? '') : '';
+    const line =
+      typeof r.line === 'number'
+        ? r.line
+        : summaryLineMap.get(`${r.method}|${r.pattern}|${filePath}`);
+
+    return {
+      method: r.method,
+      pattern: r.pattern,
+      filePath,
+      ...(typeof line === 'number' ? { line } : {}),
+      framework: r.framework || undefined,
+    };
+  });
+
+  if (routes.length === 0 && Array.isArray(summary.routes)) {
+    routes = summary.routes as ExtractedRoute[];
+  }
+
+  const coverage: CoverageReport = (summary.coverage as CoverageReport) || {
+    filesFound: files.length,
+    filesParsed: files.length,
+    filesSkipped: 0,
+    skipReasons: {},
+    skippedFiles: [],
+    importsTotal: edges.length,
+    importsResolvedInternal: edges.length,
+    importsExternal: 0,
+    importsExcluded: 0,
+    importsUnresolved: 0,
+    reExportsTotal: 0,
+    reExportsResolvedInternal: 0,
+    dynamicImportsTotal: 0,
+    dynamicImportsResolvedInternal: 0,
+    requiresTotal: 0,
+    requiresResolvedInternal: 0,
+    unresolvedDetails: [],
+  };
+
+  const repoClean = analysis.repository_url
+    ? analysis.repository_url.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '')
+    : 'Repository';
+
+  const adapter =
+    typeof summary.adapter === 'string' && summary.adapter.trim() !== ''
+      ? summary.adapter
+      : 'none';
+
+  const result: ParserResult = {
+    repositoryRoot: (summary.repositoryRoot as string) || repoClean,
+    timestamp: analysis.updated_at || analysis.created_at || new Date().toISOString(),
+    adapter,
+    files,
+    edges,
+    folders,
+    coverage,
+    routes,
+  };
+
+  return {
+    analysis,
+    result,
+  };
+}
+
+// =============================================================================
+// 2. ADMIN WORKER & CLI PIPELINE FUNCTIONS (HTTPS via createSupabaseAdminClient)
+//    Used only inside background workers / CLI verification; scoped by orgId.
+// =============================================================================
+
+export async function getAnalysisByIdAdmin(
+  analysisId: string,
+  orgId?: string
+): Promise<AnalysisRecord | null> {
+  const admin = createSupabaseAdminClient();
+  let query = admin.from('analyses').select(ANALYSIS_COLUMNS).eq('id', analysisId);
+  if (orgId) {
+    query = query.eq('org_id', orgId);
+  }
+  const { data, error } = await query.maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to fetch analysis ${analysisId} (admin): ${error.message}`
+    );
+  }
+
+  return (data as AnalysisRecord | null) ?? null;
+}
+
+export async function findExistingAnalysisAdmin(
+  orgId: string,
+  canonicalUrl: string
+): Promise<AnalysisRecord | null> {
+  const admin = createSupabaseAdminClient();
+  const { data, error } = await admin
+    .from('analyses')
+    .select(ANALYSIS_COLUMNS)
+    .eq('org_id', orgId)
+    .eq('repository_url', canonicalUrl)
+    .eq('status', 'completed')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed to find existing analysis (admin): ${error.message}`
+    );
+  }
+
+  return (data as AnalysisRecord | null) ?? null;
+}
+
+export async function createPendingAnalysisAdmin(
+  orgId: string,
+  canonicalUrl: string,
+  repoName: string,
+  branch = 'main'
+): Promise<AnalysisRecord> {
+  const admin = createSupabaseAdminClient();
+
+  const { data: existingProj, error: projSelectErr } = await admin
+    .from('projects')
+    .select('id')
+    .eq('org_id', orgId)
+    .eq('repository_url', canonicalUrl)
+    .limit(1)
+    .maybeSingle();
+
+  if (projSelectErr) {
+    throw new Error(
+      `[CodoGraph Storage] Failed querying project (admin): ${projSelectErr.message}`
+    );
+  }
+
+  let projectId: string;
+  if (existingProj?.id) {
+    projectId = existingProj.id as string;
+  } else {
+    const { data: newProj, error: projInsertErr } = await admin
+      .from('projects')
+      .insert({
+        org_id: orgId,
+        name: repoName,
+        repository_url: canonicalUrl,
+        default_branch: branch,
+      })
+      .select('id')
+      .single();
+
+    if (projInsertErr || !newProj?.id) {
+      throw new Error(
+        `[CodoGraph Storage] Failed creating project (admin): ${
+          projInsertErr?.message || 'Unknown error'
+        }`
+      );
+    }
+
+    projectId = newProj.id as string;
+  }
+
+  const { data: analysis, error: analysisErr } = await admin
+    .from('analyses')
+    .insert({
+      org_id: orgId,
+      project_id: projectId,
+      repository_url: canonicalUrl,
+      branch,
+      status: 'pending',
+      stage: 'fetching',
+      error_message: null,
+      summary: {},
+    })
+    .select(ANALYSIS_COLUMNS)
+    .single();
+
+  if (analysisErr || !analysis) {
+    throw new Error(
+      `[CodoGraph Storage] Failed creating analysis (admin): ${
+        analysisErr?.message || 'Unknown error'
+      }`
+    );
+  }
+
+  return analysis as AnalysisRecord;
+}
+
+/**
+ * Updates the stage and status of an active analysis over HTTPS.
+ * Triggers PostgreSQL broadcast for live UI progress.
  */
 export async function updateAnalysisStage(
   analysisId: string,
   orgId: string,
   stage: PipelineStage,
-  status?: 'pending' | 'fetching' | 'selecting' | 'parsing' | 'storing' | 'completed' | 'failed'
+  status?: AnalysisRecord['status']
 ): Promise<void> {
-  const effectiveStatus = status || (stage === 'complete' ? 'completed' : stage);
+  const admin = createSupabaseAdminClient();
+  const effectiveStatus: AnalysisRecord['status'] =
+    status || (stage === 'complete' ? 'completed' : stage);
+
   let lastErr: unknown;
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const client = await getAuthenticatedClient(orgId);
-      try {
-        await client.query(
-          `UPDATE public.analyses
-           SET stage = $1, status = $2, updated_at = now()
-           WHERE id = $3 AND org_id = $4;`,
-          [stage, effectiveStatus, analysisId, orgId]
-        );
-        return;
-      } finally {
-        await client.end();
+      const { error } = await admin
+        .from('analyses')
+        .update({
+          stage,
+          status: effectiveStatus,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', analysisId)
+        .eq('org_id', orgId);
+
+      if (error) {
+        throw new Error(error.message);
       }
+      return;
     } catch (err) {
       lastErr = err;
       if (attempt < 2) {
@@ -391,286 +684,231 @@ export async function markAnalysisFailed(
   failedStage: PipelineStage | string,
   errorMessage: string
 ): Promise<void> {
-  const client = await getAuthenticatedClient(orgId);
-  try {
-    await client.query(
-      `UPDATE public.analyses
-       SET status = 'failed', stage = $1, error_message = $2, updated_at = now()
-       WHERE id = $3 AND org_id = $4;`,
-      [failedStage, errorMessage, analysisId, orgId]
+  const admin = createSupabaseAdminClient();
+  const { error } = await admin
+    .from('analyses')
+    .update({
+      status: 'failed',
+      stage: failedStage,
+      error_message: errorMessage.slice(0, 2000),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', analysisId)
+    .eq('org_id', orgId);
+
+  if (error) {
+    throw new Error(
+      `[CodoGraph Storage] Failed marking analysis ${analysisId} failed: ${error.message}`
     );
-  } finally {
-    await client.end();
   }
 }
 
 /**
- * Persists complete parser results, metrics, and insights into the database.
+ * Persists complete parser results, roles, routes, metrics, and insights into Supabase over HTTPS.
  */
 export async function storeAnalysisResults(
   analysisId: string,
   orgId: string,
   commitHash: string,
   parserResult: ParserResult,
-  insights: CodebaseInsight[]
+  insights: CodebaseInsight[],
+  resolvedBranch?: string
 ): Promise<AnalysisRecord> {
-  const client = await getAuthenticatedClient(orgId);
-  try {
-    await client.query('BEGIN;');
+  const admin = createSupabaseAdminClient();
 
-    // 1. Mark stage as 'storing'
-    await client.query(
-      `UPDATE public.analyses
-       SET stage = 'storing', status = 'storing', updated_at = now()
-       WHERE id = $1 AND org_id = $2;`,
-      [analysisId, orgId]
+  const { data: repoRow, error: repoFetchErr } = await admin
+    .from('analyses')
+    .select('id, repository_url')
+    .eq('id', analysisId)
+    .eq('org_id', orgId)
+    .single();
+
+  if (repoFetchErr || !repoRow) {
+    throw new Error(
+      `[CodoGraph Storage] Analysis ${analysisId} not found for org ${orgId}: ${
+        repoFetchErr?.message || 'Not found'
+      }`
     );
-
-    // 2. Clear any prior partial rows for this analysis (idempotent overwrite)
-    await client.query(`DELETE FROM public.files WHERE analysis_id = $1;`, [analysisId]);
-    await client.query(`DELETE FROM public.edges WHERE analysis_id = $1;`, [analysisId]);
-    await client.query(`DELETE FROM public.insights WHERE analysis_id = $1;`, [analysisId]);
-    await client.query(`DELETE FROM public.file_roles WHERE analysis_id = $1;`, [analysisId]);
-    await client.query(`DELETE FROM public.routes WHERE analysis_id = $1;`, [analysisId]);
-
-    // 3. Batch insert files
-    const pathToFileId = new Map<string, string>();
-    const fileBatchSize = 100;
-
-    for (let i = 0; i < parserResult.files.length; i += fileBatchSize) {
-      const chunk = parserResult.files.slice(i, i + fileBatchSize);
-      const values: unknown[] = [];
-      const rowPlaceholders: string[] = [];
-
-      chunk.forEach((f, idx) => {
-        const offset = idx * 10;
-        rowPlaceholders.push(
-          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`
-        );
-        values.push(
-          orgId,
-          analysisId,
-          f.path,
-          f.folder,
-          f.extension,
-          f.lines,
-          f.sizeBytes,
-          f.contentHash,
-          f.fanIn,
-          f.fanOut
-        );
-      });
-
-      const insertFilesSql = `
-        INSERT INTO public.files (
-          org_id, analysis_id, path, folder, extension, lines, size_bytes, content_hash, fan_in, fan_out
-        )
-        VALUES ${rowPlaceholders.join(', ')}
-        RETURNING id, path;
-      `;
-
-      const insertedFiles = await client.query(insertFilesSql, values);
-      for (const row of insertedFiles.rows) {
-        pathToFileId.set(row.path, row.id);
-      }
-    }
-
-    // 4. Batch insert edges
-    const edgeBatchSize = 100;
-    for (let i = 0; i < parserResult.edges.length; i += edgeBatchSize) {
-      const chunk = parserResult.edges.slice(i, i + edgeBatchSize);
-      const values: unknown[] = [];
-      const rowPlaceholders: string[] = [];
-
-      chunk.forEach((e, idx) => {
-        const offset = idx * 8;
-        rowPlaceholders.push(
-          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8})`
-        );
-        values.push(
-          orgId,
-          analysisId,
-          pathToFileId.get(e.sourcePath) || null,
-          pathToFileId.get(e.targetPath) || null,
-          e.sourcePath,
-          e.targetPath,
-          e.kind,
-          e.specifier
-        );
-      });
-
-      const insertEdgesSql = `
-        INSERT INTO public.edges (
-          org_id, analysis_id, source_file_id, target_file_id, source_path, target_path, kind, specifier
-        )
-        VALUES ${rowPlaceholders.join(', ')};
-      `;
-
-      await client.query(insertEdgesSql, values);
-    }
-
-    // 5. Batch insert insights
-    if (insights.length > 0) {
-      const insightValues: unknown[] = [];
-      const insightPlaceholders: string[] = [];
-
-      insights.forEach((ins, idx) => {
-        const offset = idx * 7;
-        insightPlaceholders.push(
-          `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`
-        );
-        insightValues.push(
-          orgId,
-          analysisId,
-          ins.kind,
-          'info',
-          ins.title,
-          ins.sentence,
-          JSON.stringify({ files: ins.files, cycles: ins.cycles || [] })
-        );
-      });
-
-      const insertInsightsSql = `
-        INSERT INTO public.insights (
-          org_id, analysis_id, kind, severity, title, description, metadata
-        )
-        VALUES ${insightPlaceholders.join(', ')};
-      `;
-
-      await client.query(insertInsightsSql, insightValues);
-    }
-
-    // 6. Batch insert file roles
-    const filesWithRoles = parserResult.files.filter((f) => f.role !== null);
-    if (filesWithRoles.length > 0) {
-      const roleBatchSize = 100;
-      for (let i = 0; i < filesWithRoles.length; i += roleBatchSize) {
-        const chunk = filesWithRoles.slice(i, i + roleBatchSize);
-        const roleValues: unknown[] = [];
-        const rolePlaceholders: string[] = [];
-
-        chunk.forEach((f, idx) => {
-          const offset = idx * 7;
-          rolePlaceholders.push(
-            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7})`
-          );
-          roleValues.push(
-            orgId,
-            analysisId,
-            pathToFileId.get(f.path) || null,
-            f.path,
-            f.role,
-            'convention',
-            1.0
-          );
-        });
-
-        const insertRolesSql = `
-          INSERT INTO public.file_roles (
-            org_id, analysis_id, file_id, file_path, role, source, confidence
-          )
-          VALUES ${rolePlaceholders.join(', ')};
-        `;
-
-        await client.query(insertRolesSql, roleValues);
-      }
-    }
-
-    // 6b. Batch insert extracted routes (Phase 8)
-    if (parserResult.routes && parserResult.routes.length > 0) {
-      const routeBatchSize = 100;
-      for (let i = 0; i < parserResult.routes.length; i += routeBatchSize) {
-        const chunk = parserResult.routes.slice(i, i + routeBatchSize);
-        const routeValues: unknown[] = [];
-        const routePlaceholders: string[] = [];
-
-        chunk.forEach((r, idx) => {
-          const offset = idx * 6;
-          routePlaceholders.push(
-            `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6})`
-          );
-          routeValues.push(
-            orgId,
-            analysisId,
-            pathToFileId.get(r.filePath) || null,
-            r.method,
-            r.pattern,
-            r.framework || parserResult.adapter
-          );
-        });
-
-        const insertRoutesSql = `
-          INSERT INTO public.routes (
-            org_id, analysis_id, file_id, method, pattern, framework
-          )
-          VALUES ${routePlaceholders.join(', ')};
-        `;
-
-        await client.query(insertRoutesSql, routeValues);
-      }
-    }
-
-    // 7. Calculate coverage ratio and summary statistics
-    const coverage = parserResult.coverage;
-    const resolvedImports = coverage.importsResolvedInternal;
-    const totalImportsToResolve = coverage.importsResolvedInternal + coverage.importsUnresolved;
-    const coverageRatio =
-      coverage.filesFound > 0 && parserResult.files.length === 0
-        ? 0.0
-        : totalImportsToResolve > 0
-          ? Number(((resolvedImports / totalImportsToResolve) * 100).toFixed(1))
-          : 100.0;
-
-    const totalRoutesCount =
-      parserResult.routes !== undefined
-        ? parserResult.routes.length
-        : parserResult.files.filter(
-            (f) => f.role === 'route' || f.role === 'page' || f.role === 'route_handler'
-          ).length;
-
-    const repoRes = await client.query(
-      `SELECT repository_url FROM public.analyses WHERE id = $1;`,
-      [analysisId]
-    );
-    const rawUrl = repoRes.rows[0]?.repository_url as string | undefined;
-    const cleanRepoName = rawUrl
-      ? rawUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '')
-      : (parserResult.repositoryRoot ? path.basename(parserResult.repositoryRoot) : 'Repository');
-
-    const summary = {
-      repositoryRoot: cleanRepoName,
-      filesCount: parserResult.files.length,
-      importsCount: parserResult.edges.length,
-      routesCount: totalRoutesCount,
-      unidentifiedCount: parserResult.files.filter((f) => !f.role).length,
-      adapter: parserResult.adapter,
-      routes: parserResult.routes || [],
-      coverage: {
-        ...coverage,
-        coverageRatio,
-      },
-    };
-
-    // 8. Mark analysis completed
-    const finalRes = await client.query(
-      `UPDATE public.analyses
-       SET status = 'completed',
-           stage = 'complete',
-           commit_hash = $1,
-           summary = $2,
-           error_message = NULL,
-           updated_at = now()
-       WHERE id = $3 AND org_id = $4
-       RETURNING *;`,
-      [commitHash, JSON.stringify(summary), analysisId, orgId]
-    );
-
-    await client.query('COMMIT;');
-    return finalRes.rows[0] as AnalysisRecord;
-  } catch (err) {
-    await client.query('ROLLBACK;');
-    throw err;
-  } finally {
-    await client.end();
   }
+
+  // 1. Mark stage as 'storing'
+  await updateAnalysisStage(analysisId, orgId, 'storing', 'storing');
+
+  // 2. Clear any prior child rows for idempotent storage / re-runs (in FK-safe order)
+  const childTables = ['routes', 'file_roles', 'insights', 'edges', 'files'] as const;
+  for (const table of childTables) {
+    const { error: delErr } = await admin
+      .from(table)
+      .delete()
+      .eq('analysis_id', analysisId)
+      .eq('org_id', orgId);
+
+    if (delErr) {
+      throw new Error(
+        `[CodoGraph Storage] Failed clearing prior ${table} rows for analysis ${analysisId}: ${delErr.message}`
+      );
+    }
+  }
+
+  // 3. Batch insert files WITH role and capture generated UUIDs
+  const pathToFileId = new Map<string, string>();
+  const fileBatchSize = 200;
+
+  for (let i = 0; i < parserResult.files.length; i += fileBatchSize) {
+    const chunk = parserResult.files.slice(i, i + fileBatchSize);
+    const payload = chunk.map((f) => ({
+      org_id: orgId,
+      analysis_id: analysisId,
+      path: f.path,
+      folder: f.folder,
+      extension: f.extension,
+      lines: f.lines,
+      size_bytes: f.sizeBytes,
+      content_hash: f.contentHash,
+      fan_in: f.fanIn,
+      fan_out: f.fanOut,
+      role: f.role,
+    }));
+
+    const { data: insertedFiles, error: filesErr } = await admin
+      .from('files')
+      .insert(payload)
+      .select('id, path');
+
+    if (filesErr) {
+      throw new Error(`[CodoGraph Storage] Failed inserting files batch: ${filesErr.message}`);
+    }
+
+    for (const row of insertedFiles ?? []) {
+      pathToFileId.set(row.path as string, row.id as string);
+    }
+  }
+
+  // 4. Batch insert edges
+  if (parserResult.edges.length > 0) {
+    const edgeRows = parserResult.edges.map((e) => ({
+      org_id: orgId,
+      analysis_id: analysisId,
+      source_file_id: pathToFileId.get(e.sourcePath) || null,
+      target_file_id: pathToFileId.get(e.targetPath) || null,
+      source_path: e.sourcePath,
+      target_path: e.targetPath,
+      kind: e.kind,
+      specifier: e.specifier,
+    }));
+    await insertInChunks(admin, 'edges', edgeRows, 200);
+  }
+
+  // 5. Batch insert insights
+  if (insights.length > 0) {
+    const insightRows = insights.map((ins) => ({
+      org_id: orgId,
+      analysis_id: analysisId,
+      kind: ins.kind,
+      severity: 'info',
+      title: ins.title,
+      description: ins.sentence,
+      metadata: { files: ins.files, cycles: ins.cycles || [] },
+    }));
+    await insertInChunks(admin, 'insights', insightRows, 100);
+  }
+
+  // 6. Batch insert file roles
+  const filesWithRoles = parserResult.files.filter((f) => f.role !== null);
+  if (filesWithRoles.length > 0) {
+    const roleSource = parserResult.adapter !== 'none' ? 'adapter' : 'convention';
+    const roleRows = filesWithRoles.map((f) => ({
+      org_id: orgId,
+      analysis_id: analysisId,
+      file_id: pathToFileId.get(f.path) || null,
+      file_path: f.path,
+      role: f.role,
+      source: roleSource,
+      confidence: 1.0,
+    }));
+    await insertInChunks(admin, 'file_roles', roleRows, 200);
+  }
+
+  // 6b. Batch insert extracted routes (Phase 8)
+  if (parserResult.routes && parserResult.routes.length > 0) {
+    const routeRows = parserResult.routes.map((r) => ({
+      org_id: orgId,
+      analysis_id: analysisId,
+      file_id: pathToFileId.get(r.filePath) || null,
+      method: r.method,
+      pattern: r.pattern,
+      line: typeof r.line === 'number' ? r.line : null,
+      framework: r.framework || parserResult.adapter,
+    }));
+    await insertInChunks(admin, 'routes', routeRows, 200);
+  }
+
+  // 7. Calculate coverage ratio and summary statistics
+  const coverage = parserResult.coverage;
+  const resolvedImports = coverage.importsResolvedInternal;
+  const totalImportsToResolve = coverage.importsResolvedInternal + coverage.importsUnresolved;
+  const coverageRatio =
+    coverage.filesFound > 0 && parserResult.files.length === 0
+      ? 0.0
+      : totalImportsToResolve > 0
+        ? Number(((resolvedImports / totalImportsToResolve) * 100).toFixed(1))
+        : 100.0;
+
+  const totalRoutesCount = parserResult.routes.length;
+  const unidentifiedCount = parserResult.files.filter(
+    (f) => !f.role || f.role === 'module' || f.role === 'unknown'
+  ).length;
+
+  const rawUrl = repoRow.repository_url as string | undefined;
+  const cleanRepoName = rawUrl
+    ? rawUrl.replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '')
+    : parserResult.repositoryRoot
+      ? path.basename(parserResult.repositoryRoot)
+      : 'Repository';
+
+  const summary = {
+    repositoryRoot: cleanRepoName,
+    filesCount: parserResult.files.length,
+    importsCount: parserResult.edges.length,
+    routesCount: totalRoutesCount,
+    unidentifiedCount,
+    adapter: parserResult.adapter,
+    routes: parserResult.routes || [],
+    coverage: {
+      ...coverage,
+      coverageRatio,
+    },
+  };
+
+  // 8. Mark analysis completed
+  const completionPayload: Record<string, unknown> = {
+    status: 'completed',
+    stage: 'complete',
+    commit_hash: commitHash,
+    summary,
+    error_message: null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (resolvedBranch && resolvedBranch.trim() !== '') {
+    completionPayload.branch = resolvedBranch.trim();
+  }
+
+  const { data: finalRow, error: completeErr } = await admin
+    .from('analyses')
+    .update(completionPayload)
+    .eq('id', analysisId)
+    .eq('org_id', orgId)
+    .select(ANALYSIS_COLUMNS)
+    .single();
+
+  if (completeErr || !finalRow) {
+    throw new Error(
+      `[CodoGraph Storage] Failed finalizing analysis ${analysisId}: ${
+        completeErr?.message || 'Unknown error'
+      }`
+    );
+  }
+
+  return finalRow as AnalysisRecord;
 }

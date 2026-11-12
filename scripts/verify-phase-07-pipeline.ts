@@ -1,18 +1,18 @@
 /**
- * CodoGraph — Phase 7 Pipeline Verification Suite.
+ * CodoGraph — Phase 7 & 8 Pipeline Verification Suite (HTTPS via Supabase Admin Client).
  *
  * Verifies:
  * 1. URL Parser handles varied shapes and rejects invalid formats.
  * 2. Unauthenticated archive fetch extracts commit SHA without tokens.
- * 3. End-to-end pipeline: fetch -> select -> parse -> store.
- * 4. Stored database entities: analyses, files, edges, insights, file_roles.
+ * 3. End-to-end pipeline: fetch -> select -> parse -> store over HTTPS.
+ * 4. Stored database entities: analyses, files (with role), edges, insights, file_roles, routes.
  * 5. One analysis per repository constraint: second submission reuses existing row.
  * 6. Top-level failure handling: nonexistent repo marks analysis as 'failed' with reason and stage.
  * 7. Temporary folder cleanup on both success and failure.
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { Client } from 'pg';
+import { createSupabaseAdminClient } from '../lib/supabase/admin.ts';
 import { parseGitHubUrl, fetchRepositoryArchive } from '../lib/pipeline/github.ts';
 import { runAnalysisPipeline } from '../lib/pipeline/runner.ts';
 
@@ -33,11 +33,7 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const dbUrl =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:gpsv%40280907sv@db.xiimblxgfdirkqhbekfn.supabase.co:5432/postgres';
-
-const TEST_ORG = 'org_seed_alpha';
+const TEST_ORG = 'org_verify_phase07_temp';
 let passed = 0;
 let failed = 0;
 
@@ -118,123 +114,130 @@ async function verify() {
   }
 
   // --- Suite 3: End-to-End Pipeline Execution (expressjs/cookie-parser) ---
-  console.log('\n--- Test Suite 3: Full Pipeline Ingestion & Database Storage ---');
-  const client = new Client({
-    connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false },
-  });
-  await client.connect();
+  console.log('\n--- Test Suite 3: Full Pipeline Ingestion & HTTPS Database Storage ---');
+  const admin = createSupabaseAdminClient();
 
-  // Clean any previous test run for expressjs/cookie-parser in TEST_ORG
+  const { error: orgErr } = await admin
+    .from('organizations')
+    .upsert({ id: TEST_ORG, name: 'Phase 7 Verification Temp Org' }, { onConflict: 'id' });
+  if (orgErr) {
+    throw new Error(`Failed creating test organization: ${orgErr.message}`);
+  }
+
   const testRepoUrl = 'https://github.com/expressjs/cookie-parser';
-  await client.query(
-    `DELETE FROM public.analyses WHERE org_id = $1 AND repository_url = $2;`,
-    [TEST_ORG, testRepoUrl]
-  );
 
-  const stagesVisited: string[] = [];
-  const pipelineResult = await runAnalysisPipeline(testRepoUrl, TEST_ORG, {
-    onStageChange: (stage) => stagesVisited.push(stage),
-  });
+  try {
+    const stagesVisited: string[] = [];
+    const pipelineResult = await runAnalysisPipeline(testRepoUrl, TEST_ORG, {
+      onStageChange: (stage) => stagesVisited.push(stage),
+    });
 
-  assert(
-    stagesVisited.includes('fetching') &&
-      stagesVisited.includes('selecting') &&
-      stagesVisited.includes('parsing') &&
-      stagesVisited.includes('storing') &&
-      stagesVisited.includes('complete'),
-    `All named stages executed in sequence: ${stagesVisited.join(' -> ')}`
-  );
-
-  assert(!pipelineResult.reusedExisting, 'First run creates a fresh analysis (reusedExisting = false)');
-  assert(pipelineResult.analysis.status === 'completed', 'Analysis status is "completed"');
-  assert(pipelineResult.analysis.stage === 'complete', 'Analysis stage is "complete"');
-  assert(
-    pipelineResult.analysis.commit_hash !== null && pipelineResult.analysis.commit_hash.length >= 7,
-    `Commit SHA saved to database: ${pipelineResult.analysis.commit_hash}`
-  );
-
-  // Verify rows in public.files
-  const filesRes = await client.query(
-    `SELECT * FROM public.files WHERE analysis_id = $1;`,
-    [pipelineResult.analysis.id]
-  );
-  assert(filesRes.rows.length >= 1, `Files stored in public.files (count: ${filesRes.rows.length})`);
-  assert(filesRes.rows[0].org_id === TEST_ORG, 'Stored file preserves org_id multi-tenant key');
-
-  // Verify insights in public.insights
-  const insightsRes = await client.query(
-    `SELECT * FROM public.insights WHERE analysis_id = $1;`,
-    [pipelineResult.analysis.id]
-  );
-  assert(
-    insightsRes.rows.length === 4,
-    `All four codebase insights persisted in public.insights (count: ${insightsRes.rows.length})`
-  );
-
-  // --- Suite 4: One Analysis Per Repository Constraint ---
-  console.log('\n--- Test Suite 4: "One Analysis Per Repository" Invariant ---');
-  {
-    const secondResult = await runAnalysisPipeline(testRepoUrl, TEST_ORG);
     assert(
-      secondResult.reusedExisting === true,
-      'Re-submitting existing repository URL reuses existing analysis'
+      stagesVisited.includes('fetching') &&
+        stagesVisited.includes('selecting') &&
+        stagesVisited.includes('parsing') &&
+        stagesVisited.includes('storing') &&
+        stagesVisited.includes('complete'),
+      `All named stages executed in sequence: ${stagesVisited.join(' -> ')}`
     );
+
+    assert(!pipelineResult.reusedExisting, 'First run creates a fresh analysis (reusedExisting = false)');
+    assert(pipelineResult.analysis.status === 'completed', 'Analysis status is "completed"');
+    assert(pipelineResult.analysis.stage === 'complete', 'Analysis stage is "complete"');
     assert(
-      secondResult.analysis.id === pipelineResult.analysis.id,
-      'Returns the exact existing analysis ID without re-creating'
+      pipelineResult.analysis.commit_hash !== null && pipelineResult.analysis.commit_hash.length >= 7,
+      `Commit SHA saved to database: ${pipelineResult.analysis.commit_hash}`
     );
 
-    const countRes = await client.query(
-      `SELECT count(*) FROM public.analyses WHERE org_id = $1 AND repository_url = $2;`,
-      [TEST_ORG, testRepoUrl]
-    );
+    // Verify rows in public.files
+    const { data: fileRows, error: filesErr } = await admin
+      .from('files')
+      .select('id, org_id, path, role')
+      .eq('analysis_id', pipelineResult.analysis.id);
+    if (filesErr) throw new Error(filesErr.message);
+
+    assert((fileRows?.length ?? 0) >= 1, `Files stored in public.files (count: ${fileRows?.length ?? 0})`);
+    assert(fileRows?.[0]?.org_id === TEST_ORG, 'Stored file preserves org_id multi-tenant key');
+
+    // Verify insights in public.insights
+    const { data: insightRows, error: insightsErr } = await admin
+      .from('insights')
+      .select('id, kind')
+      .eq('analysis_id', pipelineResult.analysis.id);
+    if (insightsErr) throw new Error(insightsErr.message);
+
     assert(
-      parseInt(countRes.rows[0].count, 10) === 1,
-      'Exactly 1 analysis row exists in database for this repository (not two)'
+      (insightRows?.length ?? 0) === 4,
+      `All four codebase insights persisted in public.insights (count: ${insightRows?.length ?? 0})`
     );
-  }
 
-  // --- Suite 5: Top-Level Failure Handling ---
-  console.log('\n--- Test Suite 5: Failure State Capture ---');
-  {
-    const badRepoUrl = 'https://github.com/octocat/this-repository-definitely-does-not-exist-99999';
-    let threw = false;
-    let failedAnalysisId: string | null = null;
-
-    try {
-      await runAnalysisPipeline(badRepoUrl, TEST_ORG, {
-        onStageChange: (_stage, id) => {
-          failedAnalysisId = id;
-        },
-      });
-    } catch {
-      threw = true;
-    }
-
-    assert(threw, 'Pipeline throws error for nonexistent repository');
-
-    if (failedAnalysisId) {
-      const failedRow = await client.query(
-        `SELECT * FROM public.analyses WHERE id = $1;`,
-        [failedAnalysisId]
-      );
-      assert(failedRow.rows.length === 1, 'Failed analysis record exists');
-      assert(failedRow.rows[0].status === 'failed', 'Analysis status marked "failed" (not stuck in parsing)');
-      assert(failedRow.rows[0].stage === 'fetching', 'Analysis recorded failed stage as "fetching"');
+    // --- Suite 4: One Analysis Per Repository Constraint ---
+    console.log('\n--- Test Suite 4: "One Analysis Per Repository" Invariant ---');
+    {
+      const secondResult = await runAnalysisPipeline(testRepoUrl, TEST_ORG);
       assert(
-        typeof failedRow.rows[0].error_message === 'string' &&
-          failedRow.rows[0].error_message.includes('not found'),
-        `Error message recorded in database: "${failedRow.rows[0].error_message}"`
+        secondResult.reusedExisting === true,
+        'Re-submitting existing repository URL reuses existing analysis'
+      );
+      assert(
+        secondResult.analysis.id === pipelineResult.analysis.id,
+        'Returns the exact existing analysis ID without re-creating'
+      );
+
+      const { data: dupRows, error: dupErr } = await admin
+        .from('analyses')
+        .select('id')
+        .eq('org_id', TEST_ORG)
+        .eq('repository_url', testRepoUrl);
+      if (dupErr) throw new Error(dupErr.message);
+
+      assert(
+        (dupRows?.length ?? 0) === 1,
+        'Exactly 1 analysis row exists in database for this repository (not two)'
       );
     }
-  }
 
-  // Cleanup test rows
-  await client.query(`DELETE FROM public.analyses WHERE org_id = $1 AND (repository_url LIKE '%cookie-parser%' OR repository_url LIKE '%octocat%');`, [
-    TEST_ORG,
-  ]);
-  await client.end();
+    // --- Suite 5: Top-Level Failure Handling ---
+    console.log('\n--- Test Suite 5: Failure State Capture ---');
+    {
+      const badRepoUrl = 'https://github.com/octocat/this-repository-definitely-does-not-exist-99999';
+      let threw = false;
+      let failedAnalysisId: string | null = null;
+
+      try {
+        await runAnalysisPipeline(badRepoUrl, TEST_ORG, {
+          onStageChange: (_stage, id) => {
+            failedAnalysisId = id;
+          },
+        });
+      } catch {
+        threw = true;
+      }
+
+      assert(threw, 'Pipeline throws error for nonexistent repository');
+
+      if (failedAnalysisId) {
+        const { data: failedRow, error: failedErr } = await admin
+          .from('analyses')
+          .select('id, status, stage, error_message')
+          .eq('id', failedAnalysisId)
+          .maybeSingle();
+        if (failedErr) throw new Error(failedErr.message);
+
+        assert(Boolean(failedRow), 'Failed analysis record exists');
+        assert(failedRow?.status === 'failed', 'Analysis status marked "failed" (not stuck in parsing)');
+        assert(failedRow?.stage === 'fetching', 'Analysis recorded failed stage as "fetching"');
+        assert(
+          typeof failedRow?.error_message === 'string' &&
+            failedRow.error_message.includes('not found'),
+          `Error message recorded in database: "${failedRow?.error_message}"`
+        );
+      }
+    }
+  } finally {
+    // Cascade-delete the temporary organization row so zero test data lingers
+    await admin.from('organizations').delete().eq('id', TEST_ORG);
+  }
 
   console.log('\n====================================================');
   console.log(`Results: ${passed} passed, ${failed} failed`);

@@ -11,6 +11,7 @@
  */
 import React from 'react';
 import { redirect } from 'next/navigation';
+import { auth } from '@clerk/nextjs/server';
 import { OrganizationProfile } from '@clerk/nextjs';
 import { resolveOrgContext } from '@/lib/auth/org-context';
 import { OrgSync } from '@/components/org-sync';
@@ -18,6 +19,11 @@ import { OrgSync } from '@/components/org-sync';
 export const dynamic = 'force-dynamic';
 
 export default async function TeamPage() {
+  const sessionAuth = await auth({ treatPendingAsSignedOut: false });
+  if (!sessionAuth.userId) {
+    redirect('/sign-in');
+  }
+
   const ctx = await resolveOrgContext(true);
 
   if (!ctx.isAuthenticated || !ctx.userId) {
@@ -41,21 +47,19 @@ export default async function TeamPage() {
         <OrganizationProfile
           appearance={{
             variables: {
-              colorPrimary: '#F64302',
-              colorBackground: '#0c0d11',
               borderRadius: '0.75rem',
               fontFamily: 'JetBrains Mono, monospace',
             },
             elements: {
               card: 'bg-card border border-border rounded-3xl shadow-xl text-foreground font-jetbrains',
               navbar: 'border-b border-border',
-              navbarButton: 'text-xs font-jetbrains hover:text-[#F64302]',
+              navbarButton: 'text-xs font-jetbrains hover:text-primary',
               headerTitle: 'font-bubbledot text-xl text-foreground',
               headerSubtitle: 'font-jetbrains text-xs text-muted-foreground',
               formButtonPrimary:
-                'bg-[#F64302] hover:bg-[#ff4e0d] text-white font-jetbrains text-xs rounded-xl py-2.5 transition-all shadow-md',
+                'bg-primary hover:bg-primary/90 text-primary-foreground font-jetbrains text-xs rounded-xl py-2.5 transition-all shadow-md',
               formFieldInput:
-                'bg-secondary border border-border text-foreground rounded-xl text-xs font-jetbrains focus:border-[#F64302]',
+                'bg-secondary border border-border text-foreground rounded-xl text-xs font-jetbrains focus:border-primary',
             },
           }}
           routing="hash"

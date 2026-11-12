@@ -80,13 +80,60 @@ export function parseGitHubUrl(input: string): GitHubCoordinates {
 
   // Remove trailing slashes or .git
   repo = repo.replace(/\/+$/, '').replace(/\.git$/, '');
+  const cleanRef = ref?.replace(/\/+$/, '').trim() || undefined;
 
   return {
     owner,
     repo,
-    ref: ref?.trim(),
+    ref: cleanRef,
     canonicalUrl: `https://github.com/${owner}/${repo}`,
   };
+}
+
+/**
+ * Resolves the default branch from GitHub public repository metadata when no ref is given.
+ */
+async function fetchDefaultBranch(coords: GitHubCoordinates): Promise<string> {
+  if (coords.ref) return coords.ref;
+
+  const url = `https://api.github.com/repos/${coords.owner}/${coords.repo}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'CodoGraph/1.0',
+        Accept: 'application/vnd.github.v3+json',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (res.status === 404) {
+      throw new Error(
+        `Repository not found or private: ${coords.owner}/${coords.repo}. Only public GitHub repositories are supported.`
+      );
+    }
+
+    if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+      throw new Error(
+        'GitHub unauthenticated API rate limit exceeded (HTTP 403). Please try again shortly.'
+      );
+    }
+
+    if (res.ok) {
+      const data = (await res.json()) as { default_branch?: string };
+      if (data?.default_branch && data.default_branch.trim() !== '') {
+        return data.default_branch.trim();
+      }
+    }
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('Repository not found') || err.message.includes('rate limit exceeded'))
+    ) {
+      throw err;
+    }
+  }
+
+  return 'main';
 }
 
 /**
@@ -102,11 +149,18 @@ async function fetchCommitSha(coords: GitHubCoordinates): Promise<string | null>
         'User-Agent': 'CodoGraph/1.0',
         Accept: 'application/vnd.github.v3+json',
       },
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (res.status === 404) {
       throw new Error(
         `Repository not found or private: ${coords.owner}/${coords.repo}. Only public GitHub repositories are supported.`
+      );
+    }
+
+    if (res.status === 403 && res.headers.get('x-ratelimit-remaining') === '0') {
+      throw new Error(
+        'GitHub unauthenticated API rate limit exceeded (HTTP 403). Please try again shortly.'
       );
     }
 
@@ -117,10 +171,13 @@ async function fetchCommitSha(coords: GitHubCoordinates): Promise<string | null>
       }
     }
   } catch (err) {
-    if (err instanceof Error && err.message.includes('Repository not found')) {
+    if (
+      err instanceof Error &&
+      (err.message.includes('Repository not found') || err.message.includes('rate limit exceeded'))
+    ) {
       throw err;
     }
-    // Rate limit or network hiccup; fallback to header/archive inspection
+    // Network hiccup; fallback to header/archive inspection
   }
 
   return null;
@@ -133,8 +190,12 @@ async function fetchCommitSha(coords: GitHubCoordinates): Promise<string | null>
 export async function fetchRepositoryArchive(inputUrl: string): Promise<FetchedRepository> {
   const coords = parseGitHubUrl(inputUrl);
 
-  // 1. Resolve commit SHA if available via public commits API
-  let commitHash = await fetchCommitSha(coords);
+  // 1. Resolve commit SHA and default branch concurrently if available via public API
+  const [initialCommitHash, resolvedBranch] = await Promise.all([
+    fetchCommitSha(coords),
+    fetchDefaultBranch(coords),
+  ]);
+  let commitHash = initialCommitHash;
 
   // 2. Fetch the tarball archive
   const tarballEndpoint = coords.ref
@@ -147,11 +208,18 @@ export async function fetchRepositoryArchive(inputUrl: string): Promise<FetchedR
       Accept: 'application/vnd.github.v3+json',
     },
     redirect: 'follow',
+    signal: AbortSignal.timeout(45_000),
   });
 
   if (response.status === 404) {
     throw new Error(
       `Repository not found or private: ${coords.owner}/${coords.repo}. Only public repositories are supported.`
+    );
+  }
+
+  if (response.status === 403) {
+    throw new Error(
+      'GitHub unauthenticated API rate limit exceeded (HTTP 403). Please try again shortly.'
     );
   }
 
@@ -226,7 +294,7 @@ export async function fetchRepositoryArchive(inputUrl: string): Promise<FetchedR
       commitHash,
       canonicalUrl: coords.canonicalUrl,
       repoName: coords.repo,
-      branch: coords.ref || 'main',
+      branch: resolvedBranch,
       cleanup,
     };
   } catch (err) {

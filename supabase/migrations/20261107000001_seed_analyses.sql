@@ -44,8 +44,8 @@ on conflict (id) do update set
   name = excluded.name,
   repository_url = excluded.repository_url;
 
--- 4. Clean up any previous analyses to match reference list exactly
-delete from public.analyses where org_id in ('org_seed_alpha', 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot', 'org_seed_beta', 'org_3Lmw76eq1UOXrjIxXVQCz2u4tQN');
+-- 4. Clean up only automated test orgs so re-running migrations never deletes real user analyses
+delete from public.analyses where org_id in ('org_seed_alpha', 'org_seed_beta');
 
 -- 5. Analyses for SAKTHIVEL's Organization & Org Alpha (5 analyses matching reference image)
 insert into public.analyses (id, org_id, project_id, repository_url, branch, commit_hash, status, stage, error_message, created_at, updated_at)
@@ -186,7 +186,8 @@ values
     null,
     now() - interval '3 days',
     now() - interval '3 days'
-  );
+  )
+on conflict (id) do nothing;
 
 -- 6. Analyses for Starlight Autonomous Core & Org Beta (2 analyses)
 insert into public.analyses (id, org_id, project_id, repository_url, branch, commit_hash, status, stage, summary, created_at, updated_at)
@@ -242,4 +243,5 @@ values
     '{"files_count": 0, "edges_count": 0, "routes_count": 0}'::jsonb,
     now() - interval '2 hours',
     now() - interval '2 hours'
-  );
+  )
+on conflict (id) do nothing;

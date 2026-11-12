@@ -1,16 +1,18 @@
 "use client";
 
 /**
- * CodoGraph — Canvas Left Rail (Phase 6).
+ * CodoGraph — Canvas Left Rail (Phase 4, 6 & 8).
  *
- * Implements category filtering from docs/specs/phase-06.md:
- * - Clicking a category dims everything on canvas that isn't in it, rather than removing it.
+ * Implements framework-reshaped fixed-order category filtering:
+ * - Displays `Categories · <N> files` header matching the dense tool shell.
+ * - Fixed reading order with zero-count framework slots subtly muted.
+ * - Colour swatch + category name + right-aligned tabular file count.
+ * - Clicking a category dims everything on canvas that isn't in it.
  * - Clicking the active category again deselects it (returns to full visibility).
- * - Monospace list of extensions with colored swatches and counts.
  */
 import React from 'react';
 import type { FileCategory } from '@/lib/canvas/taxonomy';
-import { Filter, X } from 'lucide-react';
+import { X } from 'lucide-react';
 
 export interface LeftRailProps {
   categories: FileCategory[];
@@ -27,71 +29,78 @@ export function LeftRail({
 }: LeftRailProps) {
   return (
     <aside
-      className="w-56 shrink-0 h-full bg-[#0a0a0c]/90 border-r border-white/5 flex flex-col select-none z-10 font-mono"
+      className="w-56 shrink-0 h-full bg-card border-r border-border flex flex-col select-none z-10 font-mono text-foreground"
       aria-label="Repository Categories"
     >
-      {/* Rail Header with active filter clear button */}
-      <div className="pt-4 pb-3 px-4 flex items-center justify-between text-[11px] text-white/50 border-b border-white/[0.04]">
-        <div className="flex items-center gap-1.5">
-          {activeCategory && <Filter className="w-3 h-3 text-[#38bdf8]" />}
-          <span className={activeCategory ? 'text-white font-semibold' : ''}>
+      {/* Rail Header with total file count or clear action */}
+      <div className="h-10 px-3.5 flex items-center justify-between text-[11px] text-muted-foreground border-b border-border shrink-0">
+        <div className="flex items-center gap-1.5 min-w-0 truncate">
+          <span className={activeCategory ? 'text-foreground font-medium' : ''}>
             Categories
           </span>
+          <span className="opacity-50">·</span>
+          <span className="tabular-nums">{totalFiles} files</span>
         </div>
 
-        {activeCategory ? (
+        {activeCategory && (
           <button
             type="button"
             onClick={() => onSelectCategory(null)}
-            className="flex items-center gap-1 text-[10px] text-[#38bdf8] hover:text-white px-1.5 py-0.5 rounded bg-[#38bdf8]/10 border border-[#38bdf8]/20 transition-colors"
+            className="flex items-center gap-0.5 text-[10px] text-primary hover:opacity-80 px-1.5 py-0.5 rounded bg-primary/10 border border-primary/25 transition-colors cursor-pointer shrink-0 ml-1"
             title="Clear category filter"
           >
             <span>clear</span>
             <X className="w-2.5 h-2.5" />
           </button>
-        ) : (
-          <div className="flex items-center gap-1">
-            <span className="text-white/30">·</span>
-            <span className="text-white/40">{totalFiles} files</span>
-          </div>
         )}
       </div>
 
-      {/* Category Rows: Clickable filter buttons */}
-      <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
+      {/* Category Rows */}
+      <div className="flex-1 overflow-y-auto py-1.5">
         {categories.map((cat) => {
           const isActive = activeCategory === cat.name;
+          const isEmpty = cat.count === 0;
 
           return (
             <button
               key={cat.id}
               type="button"
-              onClick={() =>
-                onSelectCategory(isActive ? null : cat.name)
-              }
-              className={`w-full flex items-center justify-between py-1.5 px-2 rounded text-xs transition-all text-left ${
+              disabled={isEmpty}
+              onClick={() => {
+                if (isEmpty) return;
+                onSelectCategory(isActive ? null : cat.name);
+              }}
+              className={`w-full flex items-center justify-between py-1.5 px-3.5 text-xs transition-colors text-left border-l-2 ${
                 isActive
-                  ? 'bg-white/10 ring-1 ring-[#38bdf8]/50 text-white font-medium shadow-[0_0_10px_rgba(56,189,248,0.2)]'
-                  : 'text-white/70 hover:bg-white/[0.04] hover:text-white'
+                  ? 'bg-primary/15 border-l-primary text-foreground font-medium cursor-pointer'
+                  : isEmpty
+                    ? 'border-l-transparent text-muted-foreground/45 cursor-default'
+                    : 'border-l-transparent text-muted-foreground hover:bg-secondary/60 hover:text-foreground cursor-pointer'
               }`}
-              title={`Click to dim everything except ${cat.name}`}
+              title={
+                isEmpty
+                  ? `${cat.name}: 0 files`
+                  : `Click to dim everything except ${cat.name}`
+              }
             >
-              <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 pr-2">
                 <span
-                  className={`w-2.5 h-2.5 rounded-[2px] shrink-0 transition-transform ${
-                    isActive ? 'scale-125 ring-1 ring-white' : ''
+                  className={`w-2 h-2 rounded-[2px] shrink-0 transition-opacity ${
+                    isActive ? 'opacity-100' : isEmpty ? 'opacity-25' : 'opacity-80'
                   }`}
                   style={{ backgroundColor: cat.color }}
                   aria-hidden="true"
                 />
-                <span className="text-xs font-mono truncate">
-                  {cat.name}
-                </span>
+                <span className="text-xs font-sans truncate">{cat.name}</span>
               </div>
 
               <span
-                className={`text-xs tabular-nums font-mono ${
-                  isActive ? 'text-[#38bdf8] font-bold' : 'text-white/45'
+                className={`text-xs tabular-nums font-mono shrink-0 ${
+                  isActive
+                    ? 'text-foreground font-semibold'
+                    : isEmpty
+                      ? 'text-muted-foreground/45'
+                      : 'text-muted-foreground'
                 }`}
               >
                 {cat.count}

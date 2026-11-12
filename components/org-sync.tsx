@@ -15,23 +15,24 @@ import { useOrganization, useClerk } from "@clerk/nextjs";
 export function OrgSync({ activeOrgId }: { activeOrgId: string | null }) {
   const router = useRouter();
   const { organization, isLoaded } = useOrganization();
-  const { setActive } = useClerk();
+  const clerk = useClerk();
   const syncAttempted = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!isLoaded || !activeOrgId) return;
+    if (!clerk.loaded || !isLoaded || !activeOrgId) return;
     if (organization?.id === activeOrgId) return;
     if (syncAttempted.current === activeOrgId) return;
 
     syncAttempted.current = activeOrgId;
-    setActive({ organization: activeOrgId })
+    clerk
+      .setActive({ organization: activeOrgId })
       .then(() => {
         router.refresh();
       })
       .catch((err) => {
         console.warn("[CodoGraph] Organization sync warning:", err);
       });
-  }, [isLoaded, organization, activeOrgId, setActive, router]);
+  }, [clerk, isLoaded, organization, activeOrgId, router]);
 
   return null;
 }

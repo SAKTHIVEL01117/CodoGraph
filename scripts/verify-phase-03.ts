@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseRepository } from '../lib/parser/index.ts';
-import type { ParserResult, ParsedFile, ParsedEdge } from '../lib/parser/index.ts';
+import type { ParserResult } from '../lib/parser/index.ts';
 
 let passes = 0;
 let fails = 0;

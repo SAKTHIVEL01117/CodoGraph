@@ -11,7 +11,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { normalizePath } from './walker.ts';
-import type { EdgeKind } from './types.ts';
 
 // Extensions probed in priority order when an import omits the extension
 const RESOLVE_EXTENSIONS = [
@@ -101,6 +100,91 @@ export type ResolutionResult =
   | { type: 'unresolved'; reason: string };
 
 /**
+ * Strips // and /* *\/ comments as well as trailing commas from JSONC/tsconfig text
+ * without altering slashes or asterisks inside quoted strings (e.g. "@/*").
+ */
+function stripJsonCommentsAndTrailingCommas(raw: string): string {
+  let out = '';
+  let inString = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let i = 0;
+
+  while (i < raw.length) {
+    const ch = raw[i];
+    const next = raw[i + 1];
+
+    if (inLineComment) {
+      if (ch === '\n') {
+        inLineComment = false;
+        out += ch;
+      }
+      i++;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 2;
+      } else {
+        i++;
+      }
+      continue;
+    }
+
+    if (inString) {
+      out += ch;
+      if (ch === '\\' && i + 1 < raw.length) {
+        out += raw[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      i++;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === '/' && next === '/') {
+      inLineComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 2;
+      continue;
+    }
+
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < raw.length && /\s/.test(raw[j])) {
+        j++;
+      }
+      if (raw[j] === '}' || raw[j] === ']') {
+        i++;
+        continue;
+      }
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
+/**
  * Loads compilerOptions.paths and baseUrl from tsconfig.json or jsconfig.json if present.
  */
 export function loadTsConfigPaths(repositoryRoot: string): TsConfigPaths {
@@ -111,8 +195,7 @@ export function loadTsConfigPaths(repositoryRoot: string): TsConfigPaths {
     if (fs.existsSync(fullPath)) {
       try {
         const raw = fs.readFileSync(fullPath, 'utf8');
-        // Strip simple comments from json
-        const clean = raw.replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1');
+        const clean = stripJsonCommentsAndTrailingCommas(raw);
         const parsed = JSON.parse(clean);
         const compilerOptions = parsed?.compilerOptions || {};
         return {
@@ -138,6 +221,10 @@ function probeCandidatePath(
     const withExt = ext ? `${candidateAbsPath}${ext}` : candidateAbsPath;
     const rel = normalizePath(path.relative(repositoryRoot, withExt));
 
+    if (rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) {
+      continue;
+    }
+
     if (knownFiles.has(rel)) {
       return rel;
     }
@@ -150,6 +237,10 @@ function probeCandidatePath(
   for (const indexFile of INDEX_FILES) {
     const withIndex = path.join(candidateAbsPath, indexFile);
     const rel = normalizePath(path.relative(repositoryRoot, withIndex));
+
+    if (rel === '..' || rel.startsWith('../') || path.isAbsolute(rel)) {
+      continue;
+    }
 
     if (knownFiles.has(rel)) {
       return rel;
@@ -199,8 +290,13 @@ export function resolveModuleSpecifier(
 
   const sourceAbsDir = path.dirname(path.join(repositoryRoot, sourceRelPath));
 
-  // 3. Relative Imports: "./foo", "../bar"
-  if (trimmed.startsWith('./') || trimmed.startsWith('../')) {
+  // 3. Relative Imports: ".", "..", "./foo", "../bar"
+  if (
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../')
+  ) {
     const candidateAbsPath = path.resolve(sourceAbsDir, trimmed);
     const resolvedRel = probeCandidatePath(candidateAbsPath, repositoryRoot, knownFiles);
 

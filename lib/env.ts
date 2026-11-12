@@ -33,13 +33,24 @@ export function validateEnv(): void {
     }
   }
 
-  // Supabase key: either new or legacy name is acceptable
+  // Supabase publishable/anon key: either new or legacy name is acceptable
   const hasSupabaseKey =
     (process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim() ?? '') !== '' ||
     (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ?? '') !== '';
 
   if (!hasSupabaseKey) {
     missing.push('NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or NEXT_PUBLIC_SUPABASE_ANON_KEY)');
+  }
+
+  // Server-only Supabase secret key for background pipeline writes
+  if (typeof window === 'undefined') {
+    const hasSecretKey =
+      (process.env.SUPABASE_SECRET_KEY?.trim() ?? '') !== '' ||
+      (process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? '') !== '';
+
+    if (!hasSecretKey) {
+      missing.push('SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY)');
+    }
   }
 
   if (missing.length > 0) {
@@ -69,17 +80,13 @@ export function validateEnv(): void {
   }
 }
 
-// Run validation when this module is imported — fail loudly in dev/runtime.
-// During production build (phase-production-build) the env may be absent;
-// this is intentional — Vercel/Fly inject them at runtime, not build time.
-if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'test') {
-  if (process.env.NEXT_PHASE !== 'phase-production-build') {
-    try {
-      validateEnv();
-    } catch (err) {
-      // Print to stderr but do not crash the module loader in dev HMR contexts.
-      // The app will fail naturally when it tries to use the missing config.
-      console.error(err instanceof Error ? err.message : String(err));
-    }
-  }
+// Fail loudly on boot when required environment configuration is absent.
+// During production build (phase-production-build) runtime secrets may be injected separately.
+if (
+  typeof window === 'undefined' &&
+  typeof process !== 'undefined' &&
+  process.env.NODE_ENV !== 'test' &&
+  process.env.NEXT_PHASE !== 'phase-production-build'
+) {
+  validateEnv();
 }

@@ -1,21 +1,18 @@
 /**
  * CodoGraph — Server-side organization context resolver.
  *
- * Resolves the authenticated user, their active organization, role, and details
- * from Clerk.
+ * Resolves the authenticated user, their active organization, role, and metadata
+ * from Clerk, and ensures public.organizations in Supabase stays in sync.
  *
- * Automatic organization lifecycle (Phases 2 & 3):
- *  1. If the session already carries an active org claim (orgId) — fetch and return its metadata.
- *  2. If not, inspect the user's existing organization memberships.
- *  3. If existing memberships exist, resolve the first active organization.
- *  4. If the user has zero memberships (first-time registration), auto-provisions their
- *     first team organization in Clerk with default 'org:admin' role, preventing empty workspaces.
- *
- * Usage in a Server Component, Route Handler, or Server Action:
- *   const ctx = await resolveOrgContext();
- *   if (!ctx.isAuthenticated) redirect('/sign-in');
+ * Organization lifecycle (Phases 1 & 2):
+ *  1. Unauthenticated visitors fail closed cleanly (never fabricate a fallback user/org).
+ *  2. If the Clerk session carries an active orgId claim — resolve metadata & sync to Supabase.
+ *  3. If not yet active in the session cookie, check existing organization memberships.
+ *  4. If existing memberships exist, resolve the first organization so <OrgSync /> activates it.
+ *  5. If zero memberships exist and autoProvision=true, create their first Clerk organization.
  */
 import { auth, clerkClient } from '@clerk/nextjs/server';
+import { syncOrganizationToSupabase } from '@/lib/supabase/sync-org';
 
 export interface OrgContext {
   /** Clerk user ID, or null when signed out. */
@@ -34,171 +31,133 @@ export interface OrgContext {
   isAuthenticated: boolean;
 }
 
-/**
- * Resolves the current server-side auth and organization context.
- * Returns typed fields backed by Clerk session and organization claims.
- *
- * @param autoProvision - When true (default), auto-provisions an organization
- * for authenticated users who do not yet have one.
- */
+const UNAUTHENTICATED_CONTEXT: OrgContext = {
+  userId: null,
+  orgId: null,
+  orgName: null,
+  orgSlug: null,
+  orgRole: null,
+  sessionId: null,
+  isAuthenticated: false,
+};
+
 export async function resolveOrgContext(autoProvision = true): Promise<OrgContext> {
-  try {
-    const { userId, orgId, orgRole, orgSlug, sessionId } = await auth();
+  const { userId, orgId, orgRole, orgSlug, sessionId } = await auth({
+    treatPendingAsSignedOut: false,
+  });
 
-    if (!userId) {
-      if (process.env.NODE_ENV !== 'production') {
-        return {
-          userId: 'user_dev_sakthivel',
-          orgId: 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot',
-          orgName: "SAKTHIVEL's Organization",
-          orgSlug: 'sakthivel-s-organization-1794047968560798834',
-          orgRole: 'org:admin',
-          sessionId: 'dev_session',
-          isAuthenticated: true,
-        };
-      }
+  if (!userId) {
+    return UNAUTHENTICATED_CONTEXT;
+  }
 
-      return {
-        userId: null,
-        orgId: null,
-        orgName: null,
-        orgSlug: null,
-        orgRole: null,
-        sessionId: null,
-        isAuthenticated: false,
-      };
-    }
+  const client = await clerkClient();
 
-    // Try resolving organization metadata via Clerk client
+  // Case 1: Active organization claim is already present in Clerk session
+  if (orgId) {
+    let resolvedName = orgSlug || 'Workspace';
+    let resolvedSlug = orgSlug ?? null;
+
     try {
-      const client = await clerkClient();
-
-      // Case 1: Active organization claim is already set in the current session
-      if (orgId) {
-        try {
-          const org = await client.organizations.getOrganization({
-            organizationId: orgId,
-          });
-          return {
-            userId,
-            orgId,
-            orgName: org.name,
-            orgSlug: org.slug || orgSlug || null,
-            orgRole: orgRole ?? null,
-            sessionId: sessionId ?? null,
-            isAuthenticated: true,
-          };
-        } catch {
-          const defaultName = orgId === 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot'
-            ? "SAKTHIVEL's Organization"
-            : (orgSlug || 'Workspace');
-          return {
-            userId,
-            orgId,
-            orgName: defaultName,
-            orgSlug: orgSlug ?? null,
-            orgRole: orgRole ?? null,
-            sessionId: sessionId ?? null,
-            isAuthenticated: true,
-          };
-        }
-      }
-
-      // Case 2: Signed in, but orgId claim is not yet active in this session
-      if (!autoProvision) {
-        return {
-          userId,
-          orgId: 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot',
-          orgName: "SAKTHIVEL's Organization",
-          orgSlug: null,
-          orgRole: 'org:admin',
-          sessionId: sessionId ?? null,
-          isAuthenticated: true,
-        };
-      }
-
-      const memberships = await client.users.getOrganizationMembershipList({
-        userId,
-        limit: 10,
+      const org = await client.organizations.getOrganization({
+        organizationId: orgId,
       });
-
-      if (memberships.data && memberships.data.length > 0) {
-        const first = memberships.data[0];
-        return {
-          userId,
-          orgId: first.organization.id,
-          orgName: first.organization.name,
-          orgSlug: first.organization.slug || null,
-          orgRole: first.role,
-          sessionId: sessionId ?? null,
-          isAuthenticated: true,
-        };
-      }
-
-      // Case 3: First-time registration with zero memberships — auto-provision first org
-      const user = await client.users.getUser(userId);
-      const displayName =
-        user.fullName ||
-        user.firstName ||
-        user.username ||
-        user.emailAddresses[0]?.emailAddress?.split('@')[0] ||
-        'SAKTHIVEL';
-      const defaultOrgName = `${displayName}'s Organization`;
-
-      const newOrg = await client.organizations.createOrganization({
-        name: defaultOrgName,
-        createdBy: userId,
-      });
-
-      return {
-        userId,
-        orgId: newOrg.id,
-        orgName: newOrg.name,
-        orgSlug: newOrg.slug || null,
-        orgRole: 'org:admin',
-        sessionId: sessionId ?? null,
-        isAuthenticated: true,
-      };
+      resolvedName = org.name || resolvedName;
+      resolvedSlug = org.slug || resolvedSlug;
     } catch (err) {
-      console.warn('[CodoGraph] Clerk API unavailable, using credential defaults:', err);
-      return {
-        userId,
-        orgId: orgId || 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot',
-        orgName: "SAKTHIVEL's Organization",
-        orgSlug: orgSlug || null,
-        orgRole: orgRole || 'org:admin',
-        sessionId: sessionId ?? null,
-        isAuthenticated: true,
-      };
+      console.warn(`[CodoGraph] Could not fetch Clerk organization metadata for ${orgId}:`, err);
     }
-  } catch (outerErr) {
-    console.warn('[CodoGraph] Auth context resolution error, falling back:', outerErr);
-    if (process.env.NODE_ENV !== 'production') {
-      return {
-        userId: 'user_dev_sakthivel',
-        orgId: 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot',
-        orgName: "SAKTHIVEL's Organization",
-        orgSlug: 'sakthivel-s-organization-1794047968560798834',
-        orgRole: 'org:admin',
-        sessionId: 'dev_session',
-        isAuthenticated: true,
-      };
-    }
+
+    await syncOrganizationToSupabase({
+      id: orgId,
+      name: resolvedName,
+      slug: resolvedSlug,
+    });
+
     return {
-      userId: null,
+      userId,
+      orgId,
+      orgName: resolvedName,
+      orgSlug: resolvedSlug,
+      orgRole: orgRole ?? null,
+      sessionId: sessionId ?? null,
+      isAuthenticated: true,
+    };
+  }
+
+  // Case 2: Signed in, but orgId claim is not yet active on the current session
+  const memberships = await client.users.getOrganizationMembershipList({
+    userId,
+    limit: 10,
+  });
+
+  if (memberships.data && memberships.data.length > 0) {
+    const first = memberships.data[0];
+    const resolvedName = first.organization.name || first.organization.slug || 'Workspace';
+    const resolvedSlug = first.organization.slug || null;
+
+    await syncOrganizationToSupabase({
+      id: first.organization.id,
+      name: resolvedName,
+      slug: resolvedSlug,
+    });
+
+    return {
+      userId,
+      orgId: first.organization.id,
+      orgName: resolvedName,
+      orgSlug: resolvedSlug,
+      orgRole: first.role,
+      sessionId: sessionId ?? null,
+      isAuthenticated: true,
+    };
+  }
+
+  // Case 3: First-time registration with zero memberships
+  if (!autoProvision) {
+    return {
+      userId,
       orgId: null,
       orgName: null,
       orgSlug: null,
       orgRole: null,
-      sessionId: null,
-      isAuthenticated: false,
+      sessionId: sessionId ?? null,
+      isAuthenticated: true,
     };
   }
+
+  const user = await client.users.getUser(userId);
+  const displayName =
+    user.fullName ||
+    user.firstName ||
+    user.username ||
+    user.emailAddresses[0]?.emailAddress?.split('@')[0] ||
+    'Team';
+  const defaultOrgName = `${displayName}'s Organization`;
+
+  const newOrg = await client.organizations.createOrganization({
+    name: defaultOrgName,
+    createdBy: userId,
+  });
+
+  await syncOrganizationToSupabase({
+    id: newOrg.id,
+    name: newOrg.name || defaultOrgName,
+    slug: newOrg.slug || null,
+  });
+
+  return {
+    userId,
+    orgId: newOrg.id,
+    orgName: newOrg.name || defaultOrgName,
+    orgSlug: newOrg.slug || null,
+    orgRole: 'org:admin',
+    sessionId: sessionId ?? null,
+    isAuthenticated: true,
+  };
 }
 
 /**
  * Asserts that the visitor is authenticated; throws if unauthenticated.
- * Use inside Server Actions and Route Handlers.
  */
 export async function requireAuth(): Promise<OrgContext> {
   const ctx = await resolveOrgContext(false);
@@ -210,7 +169,6 @@ export async function requireAuth(): Promise<OrgContext> {
 
 /**
  * Asserts that the visitor is authenticated and possesses an active organization.
- * Use inside Server Actions and Route Handlers.
  */
 export async function requireOrg(): Promise<OrgContext & { orgId: string }> {
   const ctx = await resolveOrgContext(true);

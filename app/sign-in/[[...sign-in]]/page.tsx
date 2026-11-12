@@ -1,12 +1,33 @@
 "use client";
 
-import React, { Suspense } from 'react';
+import React, { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { SignIn, SignOutButton, useUser, useAuth } from '@clerk/nextjs';
 import { dark } from '@clerk/themes';
-import { ChevronRight, LogOut, LayoutDashboard, UserCheck } from 'lucide-react';
+import { ChevronRight, LogOut, LayoutDashboard, UserCheck, Loader2 } from 'lucide-react';
 
-function SignedInCard() {
+function resolvePostAuthTarget(rawRedirectUrl: string | null): string {
+  if (!rawRedirectUrl || typeof window === 'undefined') return '/workspace';
+  try {
+    const parsed = new URL(rawRedirectUrl, window.location.origin);
+    if (parsed.origin !== window.location.origin) return '/workspace';
+    if (
+      parsed.pathname === '/' ||
+      parsed.pathname === '/sign-in' ||
+      parsed.pathname.startsWith('/sign-in/') ||
+      parsed.pathname === '/sign-up' ||
+      parsed.pathname.startsWith('/sign-up/')
+    ) {
+      return '/workspace';
+    }
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return '/workspace';
+  }
+}
+
+function SignedInCard({ targetUrl }: { targetUrl: string }) {
   const { user } = useUser();
   const primaryEmail = user?.primaryEmailAddress?.emailAddress || user?.emailAddresses?.[0]?.emailAddress;
   const displayName = user?.fullName || user?.username || primaryEmail || 'User';
@@ -33,10 +54,13 @@ function SignedInCard() {
 
       <div className="mt-6 flex flex-col gap-2.5">
         <a
-          href="/workspace"
+          href={targetUrl}
           onClick={(e) => {
             e.preventDefault();
-            window.location.assign('/workspace');
+            try {
+              sessionStorage.removeItem('codograph_post_auth_hops');
+            } catch {}
+            window.location.assign(targetUrl);
           }}
           className="w-full bg-white hover:bg-white/90 text-black font-jetbrains font-semibold text-xs sm:text-sm rounded-xl py-3 flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
         >
@@ -47,6 +71,11 @@ function SignedInCard() {
         <SignOutButton redirectUrl="/sign-in">
           <button
             type="button"
+            onClick={() => {
+              try {
+                sessionStorage.removeItem('codograph_post_auth_hops');
+              } catch {}
+            }}
             className="w-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-white font-jetbrains text-xs rounded-xl py-3 flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
           >
             <LogOut className="w-3.5 h-3.5 text-white/60" />
@@ -59,7 +88,53 @@ function SignedInCard() {
 }
 
 function SignInContent() {
-  const { isLoaded, isSignedIn } = useAuth();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { isLoaded, isSignedIn, getToken } = useAuth({
+    treatPendingAsSignedOut: false,
+  });
+  const [redirectBlocked, setRedirectBlocked] = useState(false);
+
+  const isCallbackRoute = pathname.includes('/sso-callback');
+  const rawRedirectUrl = searchParams.get('redirect_url');
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn || isCallbackRoute) return;
+
+    let cancelled = false;
+    (async () => {
+      // Flush active session cookie before full document navigation to workspace
+      await getToken().catch(() => null);
+      if (cancelled) return;
+
+      try {
+        const key = 'codograph_post_auth_hops';
+        const now = Date.now();
+        const raw = sessionStorage.getItem(key);
+        const recent: number[] = raw
+          ? (JSON.parse(raw) as unknown[]).filter(
+              (ts): ts is number => typeof ts === 'number' && now - ts < 10_000
+            )
+          : [];
+
+        if (recent.length >= 2) {
+          setRedirectBlocked(true);
+          return;
+        }
+
+        sessionStorage.setItem(key, JSON.stringify([...recent, now]));
+      } catch {
+        // Proceed with navigation if sessionStorage is unavailable
+      }
+
+      const target = resolvePostAuthTarget(rawRedirectUrl);
+      window.location.assign(target);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isLoaded, isSignedIn, isCallbackRoute, rawRedirectUrl, getToken]);
 
   if (!isLoaded) {
     return (
@@ -69,8 +144,19 @@ function SignInContent() {
     );
   }
 
-  if (isSignedIn) {
-    return <SignedInCard />;
+  if (isSignedIn && !isCallbackRoute) {
+    if (redirectBlocked) {
+      return <SignedInCard targetUrl={resolvePostAuthTarget(rawRedirectUrl)} />;
+    }
+
+    return (
+      <div className="bg-[#0c0d11]/95 backdrop-blur-xl border border-white/10 rounded-3xl p-6 sm:p-8 shadow-2xl text-white w-full max-w-[440px] min-h-[220px] flex flex-col items-center justify-center gap-3 text-center">
+        <Loader2 className="w-5 h-5 animate-spin text-[#F64302]" />
+        <p className="font-jetbrains text-xs text-white/70">
+          Redirecting to workspace...
+        </p>
+      </div>
+    );
   }
 
   return (

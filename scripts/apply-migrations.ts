@@ -27,9 +27,12 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const dbUrl =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:gpsv%40280907sv@db.xiimblxgfdirkqhbekfn.supabase.co:5432/postgres';
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) {
+  console.error('[FATAL] DATABASE_URL environment variable is required to execute SQL migrations.');
+  console.error('Alternatively, paste each SQL file in supabase/migrations/ into the Supabase Dashboard -> SQL Editor.');
+  process.exit(1);
+}
 
 async function applyMigrations() {
   console.log('Connecting to database...');

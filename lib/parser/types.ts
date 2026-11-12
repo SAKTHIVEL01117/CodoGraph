@@ -8,7 +8,7 @@
 
 export const PARSER_VERSION = '1.0.0';
 
-export type EdgeKind = 'import' | 're-export' | 'dynamic_import';
+export type EdgeKind = 'import' | 're-export' | 'dynamic_import' | 'require';
 
 export interface DiscoveredFile {
   /** Relative POSIX path from the repository root (e.g. "src/lib/utils.ts"). */
@@ -41,6 +41,8 @@ export interface ParsedFile extends DiscoveredFile {
   fanOut: number;
   /** Framework or architectural role assigned by an adapter (null if none). */
   role: string | null;
+  /** Exported symbol names read from CommonJS modules (`exports.*`, `module.exports`). */
+  exports?: string[];
 }
 
 export interface ParsedEdge {
@@ -109,6 +111,11 @@ export interface CoverageReport {
   /** Dynamic imports successfully resolved to files inside the repository. */
   dynamicImportsResolvedInternal: number;
 
+  /** Total CommonJS require() expressions. */
+  requiresTotal?: number;
+  /** CommonJS require() calls successfully resolved to files inside the repository. */
+  requiresResolvedInternal?: number;
+
   /** Concrete examples and details for all unresolved imports. */
   unresolvedDetails: UnresolvedImport[];
 }
@@ -120,6 +127,8 @@ export interface ExtractedRoute {
   pattern: string;
   /** Relative POSIX path of the source file implementing the route. */
   filePath: string;
+  /** 1-based line number where the route handler or export is declared. */
+  line?: number;
   /** Framework that declared the route (e.g. adapter name). */
   framework?: string;
 }

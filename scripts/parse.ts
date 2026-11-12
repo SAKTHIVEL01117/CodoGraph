@@ -41,7 +41,7 @@ function runCli() {
 
   try {
     result = parseRepository(absTarget, {
-      onProgress: (current, total, file) => {
+      onProgress: (current, total) => {
         if (total > 50 && current % 25 === 0) {
           process.stdout.write(`\r[Parsing AST] ${current}/${total} files...`);
         }
@@ -103,6 +103,17 @@ function runCli() {
   console.log('\nDynamic Import Coverage:');
   console.log(`  - Dynamic Imports Total  : ${coverage.dynamicImportsTotal}`);
   console.log(`  - Dynamic Resolved       : ${coverage.dynamicImportsResolvedInternal}`);
+
+  if ((coverage.requiresTotal ?? 0) > 0) {
+    console.log('\nCommonJS Require Coverage:');
+    console.log(`  - Requires Total         : ${coverage.requiresTotal ?? 0}`);
+    console.log(`  - Requires Resolved      : ${coverage.requiresResolvedInternal ?? 0}`);
+  }
+
+  const cjsExportFiles = files.filter((f) => Array.isArray(f.exports) && f.exports.length > 0);
+  if (cjsExportFiles.length > 0) {
+    console.log(`  - CommonJS Export Modules: ${cjsExportFiles.length}`);
+  }
 
   // 4. Unresolved Diagnostics
   if (coverage.unresolvedDetails.length > 0) {

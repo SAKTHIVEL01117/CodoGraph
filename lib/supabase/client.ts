@@ -33,10 +33,11 @@ export type ClerkTokenProvider =
  * - Never expose the Supabase service-role key here.
  */
 export function createSupabaseClient(tokenProvider?: ClerkTokenProvider): SupabaseClient {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey =
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseKey = (
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  )?.trim();
 
   if (!supabaseUrl || !supabaseKey) {
     throw new Error(
@@ -56,10 +57,6 @@ export function createSupabaseClient(tokenProvider?: ClerkTokenProvider): Supaba
       if (typeof tokenProvider === 'function') {
         return tokenProvider();
       }
-      try {
-        const token = await tokenProvider.getToken({ template: 'supabase' });
-        if (token) return token;
-      } catch {}
       return tokenProvider.getToken();
     },
   });

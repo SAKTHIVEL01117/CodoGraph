@@ -22,7 +22,7 @@ import type {
 } from './types.ts';
 import { walkRepository } from './walker.ts';
 import { loadTsConfigPaths, resolveModuleSpecifier, type TsConfigPaths } from './resolver.ts';
-import { extractSpecifiersFromSource } from './ast.ts';
+import { extractModuleSyntaxFromSource } from './ast.ts';
 import { deduplicateEdges, computeGraphMetrics, extractDistinctFolders } from './graph.ts';
 import type { FrameworkAdapter } from './adapters/types.ts';
 import { detectAdapter } from './adapters/index.ts';
@@ -89,6 +89,11 @@ export function parseRepository(
   let dynamicImportsTotal = 0;
   let dynamicImportsResolvedInternal = 0;
 
+  let requiresTotal = 0;
+  let requiresResolvedInternal = 0;
+
+  const fileExportsMap = new Map<string, string[]>();
+
   // 5. Parse every discovered source code file
   for (let i = 0; i < sourceFiles.length; i++) {
     const file = sourceFiles[i];
@@ -105,7 +110,15 @@ export function parseRepository(
       continue;
     }
 
-    const specifiers = extractSpecifiersFromSource(file.path, content, project);
+    const { specifiers, exports: cjsExports } = extractModuleSyntaxFromSource(
+      file.path,
+      content,
+      project
+    );
+
+    if (cjsExports.length > 0) {
+      fileExportsMap.set(file.path, cjsExports);
+    }
 
     for (const item of specifiers) {
       importsTotal++;
@@ -114,16 +127,19 @@ export function parseRepository(
         reExportsTotal++;
       } else if (item.kind === 'dynamic_import') {
         dynamicImportsTotal++;
+      } else if (item.kind === 'require') {
+        requiresTotal++;
       }
 
-      // Non-literal dynamic import (e.g. import(variable))
+      // Non-literal dynamic import or require() (e.g. import(variable), require(variable))
       if (!item.isLiteral) {
         importsUnresolved++;
+        const kindLabel = item.kind === 'require' ? 'CommonJS require()' : 'Dynamic import';
         unresolvedDetails.push({
           sourcePath: file.path,
           specifier: item.specifier,
           kind: item.kind,
-          reason: `Dynamic import has non-literal expression: '${item.rawExpression || item.specifier}'`,
+          reason: `${kindLabel} has non-literal expression: '${item.rawExpression || item.specifier}'`,
         });
         continue;
       }
@@ -144,6 +160,8 @@ export function parseRepository(
             reExportsResolvedInternal++;
           } else if (item.kind === 'dynamic_import') {
             dynamicImportsResolvedInternal++;
+          } else if (item.kind === 'require') {
+            requiresResolvedInternal++;
           }
 
           rawEdges.push({
@@ -185,7 +203,12 @@ export function parseRepository(
   // 7. Calculate pure graph metrics (fan-in, fan-out, role classification)
   const files = computeGraphMetrics(sourceFiles, edges, (f) =>
     adapter.classifyFile ? adapter.classifyFile(f, { repositoryRoot: absRoot }) : null
-  );
+  ).map((f) => {
+    const exportedNames = fileExportsMap.get(f.path);
+    return exportedNames && exportedNames.length > 0
+      ? { ...f, exports: exportedNames }
+      : f;
+  });
 
   // 7b. Extract exact routes via the selected framework adapter
   const routes = adapter.extractRoutes
@@ -219,6 +242,9 @@ export function parseRepository(
 
     dynamicImportsTotal,
     dynamicImportsResolvedInternal,
+
+    requiresTotal,
+    requiresResolvedInternal,
 
     unresolvedDetails,
   };

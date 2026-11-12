@@ -3,36 +3,49 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
+import { Loader2 } from "lucide-react";
 import { Navbar } from "@/components/Navbar";
 import { Hero } from "@/components/Hero";
 import { About } from "@/components/About";
 import { Products } from "@/components/Products";
 import { SplashScreen } from "@/components/SplashScreen";
-import { WorkspaceDashboard } from "@/components/workspace-dashboard";
 
 export default function RootPage() {
   const router = useRouter();
-  const { isSignedIn, isLoaded: isAuthLoaded } = useAuth();
+  const { isSignedIn, isLoaded: isAuthLoaded } = useAuth({
+    treatPendingAsSignedOut: false,
+  });
   const [showSplash, setShowSplash] = useState(false);
 
   useEffect(() => {
-    // Safe client-only check after hydration has completed cleanly
-    try {
-      const alreadyShown = sessionStorage.getItem("codograph_splash_shown") === "1";
-      if (!alreadyShown) {
-        queueMicrotask(() => {
-          setShowSplash(true);
-        });
-      }
-    } catch {}
+    if (isAuthLoaded && isSignedIn) {
+      router.replace("/workspace");
+      return;
+    }
 
-    router.prefetch("/sign-in");
-    router.prefetch("/sign-up");
-  }, [router]);
+    if (isAuthLoaded && !isSignedIn) {
+      // Safe client-only check after hydration has completed cleanly
+      try {
+        const alreadyShown = sessionStorage.getItem("codograph_splash_shown") === "1";
+        if (!alreadyShown) {
+          queueMicrotask(() => {
+            setShowSplash(true);
+          });
+        }
+      } catch {}
 
-  // When signed in, http://localhost:3000 renders the workspace directly matching reference
+      router.prefetch("/sign-in");
+      router.prefetch("/sign-up");
+    }
+  }, [isAuthLoaded, isSignedIn, router]);
+
   if (isAuthLoaded && isSignedIn) {
-    return <WorkspaceDashboard />;
+    return (
+      <div className="min-h-screen bg-background text-foreground flex items-center justify-center font-mono text-xs gap-2">
+        <Loader2 className="w-4 h-4 animate-spin text-primary" />
+        <span>Redirecting to workspace...</span>
+      </div>
+    );
   }
 
   const handleGetStarted = () => {

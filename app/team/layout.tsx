@@ -10,15 +10,15 @@ export default function TeamLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-screen bg-background text-foreground flex flex-col font-jetbrains transition-colors selection:bg-[#F64302] selection:text-white">
+    <div className="min-h-screen bg-background text-foreground flex flex-col font-jetbrains transition-colors selection:bg-primary selection:text-primary-foreground">
       {/* Shell Header */}
       <header className="border-b border-border bg-card/60 backdrop-blur-md sticky top-0 z-40 px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
         <div className="flex items-center gap-4 sm:gap-6">
           <Link
             href="/workspace"
-            className="flex items-center gap-2.5 outline-none focus-visible:ring-2 focus-visible:ring-[#F64302] rounded-lg p-1"
+            className="flex items-center gap-2.5 outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-lg p-1"
           >
-            <div className="w-6 h-6 text-[#F64302]">
+            <div className="w-6 h-6 text-primary">
               <svg
                 width="24"
                 height="24"

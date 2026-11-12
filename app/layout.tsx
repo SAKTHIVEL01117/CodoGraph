@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import Script from "next/script";
+import "@/lib/env";
 import { ClerkProvider } from "@clerk/nextjs";
-import { dark } from "@clerk/themes";
+import { shadcn } from "@clerk/themes";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
 
@@ -31,21 +33,14 @@ export default function RootLayout({
   return (
     <ClerkProvider
       appearance={{
-        theme: dark,
+        theme: shadcn,
         variables: {
-          colorPrimary: '#F64302',
-          colorPrimaryForeground: '#000000',
-          colorBackground: '#0c0d11',
-          colorInput: '#13151b',
-          colorInputForeground: '#ffffff',
-          colorForeground: '#ffffff',
-          colorNeutral: '#ffffff',
-          borderRadius: '0.75rem',
-          fontFamily: 'JetBrains Mono, monospace',
+          borderRadius: "0.75rem",
+          fontFamily: "JetBrains Mono, monospace",
         },
       }}
     >
-      <html lang="en" className="scroll-smooth" suppressHydrationWarning>
+      <html lang="en" className="scroll-smooth" data-scroll-behavior="smooth" suppressHydrationWarning>
         <head>
           <link rel="preconnect" href="https://fonts.googleapis.com" />
           <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -54,13 +49,10 @@ export default function RootLayout({
             rel="stylesheet"
           />
         </head>
-        <body className="bg-background text-foreground font-jetbrains antialiased overflow-x-hidden selection:bg-[#F64302] selection:text-white transition-colors duration-200">
-          {/* Prevent theme flash before paint without next/script error */}
-          <script
-            dangerouslySetInnerHTML={{
-              __html: THEME_INIT_SCRIPT,
-            }}
-          />
+        <body className="bg-background text-foreground font-jetbrains antialiased overflow-x-hidden selection:bg-primary selection:text-primary-foreground transition-colors duration-200">
+          <Script id="codograph-theme-init" strategy="beforeInteractive">
+            {THEME_INIT_SCRIPT}
+          </Script>
           <ThemeProvider>{children}</ThemeProvider>
         </body>
       </html>

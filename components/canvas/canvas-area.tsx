@@ -3,89 +3,405 @@
 /**
  * CodoGraph — Middle Canvas Column (Phase 4, 5 & 6).
  *
- * Implements the full interactive canvas graph with Phase 6 graph math, category dimming,
- * and transitive highlighting:
- * - Left rail category filtering: Dims everything not in the active category,
- *   while open panels show how many of their files matched.
- * - Deterministic Left-to-Right hierarchical layout (dagre / Sugiyama principles).
- * - Smooth bezier dependency curves between nodes.
- * - Deepest-first folding: ~17 nodes under two dozen, every node > 1 file.
- * - Folded nodes carry fan-in height and label width.
- * - Clicking a folded node opens it into an in-place panel with file rows and selects it.
- * - Clicking header closes it back while preserving folder selection.
- * - Selecting either a node or a file row keeps it, its edges, and whatever those
- *   edges connect to bright, and dims everything else.
- * - Transitive blast radius / dependency chain highlighting.
- * - Bidirectional hover: Hovering a neighbour in the pane highlights it on the map;
- *   hovering a node or file on the map highlights it in the pane.
- * - Full pan & zoom navigation.
+ * Implements the full interactive dependency map canvas:
+ * - Deterministic Left-to-Right Sugiyama layout with deepest-first folder folding.
+ * - Direct file-to-file & file-to-node edge connections:
+ *   - Closed folders aggregate edges smoothly between folder ports.
+ *   - Open folders route edges directly to/from every individual connected file row
+ *     (and overflow above/below indicators) including right-side intra-panel loops.
+ * - Scrollable open panels (14-row window with above/below jump controls, mouse-wheel
+ *   scrolling, and auto-scroll-into-view on selection).
+ * - Category dimming from the left rail, selection isolation, bidirectional hover,
+ *   and 2-level transitive walk highlighting (Blast radius / Dependency chain).
+ * - Palette adherence: greyscale surfaces & resting graph; blue selection/hover,
+ *   emerald incoming, amber outgoing, and category swatches for file kind dots.
  */
-import React, { useMemo, useRef, useCallback } from 'react';
-import type { FoldedNode, FoldedEdge } from '@/lib/canvas/folding';
+import React, { useMemo, useRef, useCallback, useEffect, useState } from 'react';
+import type { ParsedEdge } from '@/lib/parser/types';
+import {
+  type FoldedNode,
+  type FoldedEdge,
+  type VisualEdge,
+  PANEL_HEADER_H,
+  PANEL_PADDING_Y,
+  PANEL_ROW_H,
+  PANEL_ROW_GAP,
+  PANEL_NOTICE_H,
+  PANEL_MAX_VISIBLE_ROWS,
+  computeOpenPanelWindow,
+  getRelativeFileName,
+  resolveVisualEdges,
+} from '@/lib/canvas/folding';
 import type { FileCategory } from '@/lib/canvas/taxonomy';
 import {
-  Folder,
-  FolderOpen,
-  FileCode,
   ZoomIn,
   ZoomOut,
   Maximize2,
   GitCommit,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 
 export interface CanvasAreaProps {
   nodes: FoldedNode[];
   foldedEdges: FoldedEdge[];
+  rawEdges?: ParsedEdge[];
   selectedId: string | null;
   hoveredId: string | null;
   activeCategory?: string | null;
   categories?: FileCategory[];
   highlightedPaths?: Set<string> | null;
+  activeWalkType?: 'blast_radius' | 'dependency_chain' | null;
   onSelectId: (id: string | null) => void;
   onHoverId: (id: string | null) => void;
   onToggleNodeOpen: (nodeId: string) => void;
 }
 
+function computeFitTransform(
+  nodesToFit: FoldedNode[],
+  viewportW: number,
+  viewportH: number
+): { x: number; y: number; scale: number } {
+  if (nodesToFit.length === 0 || viewportW <= 0 || viewportH <= 0) {
+    return { x: 48, y: 40, scale: 0.85 };
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const n of nodesToFit) {
+    minX = Math.min(minX, n.x);
+    minY = Math.min(minY, n.y);
+    maxX = Math.max(maxX, n.x + n.width);
+    maxY = Math.max(maxY, n.y + n.height);
+  }
+
+  const bboxW = Math.max(1, maxX - minX);
+  const bboxH = Math.max(1, maxY - minY);
+
+  const padX = 48;
+  const padTop = 36;
+  const padBottom = 56;
+  const availW = Math.max(120, viewportW - padX * 2);
+  const availH = Math.max(120, viewportH - padTop - padBottom);
+
+  const scale = Math.min(
+    1.0,
+    Math.max(0.2, Math.min(availW / bboxW, availH / bboxH))
+  );
+  const x = (viewportW - bboxW * scale) / 2 - minX * scale;
+  const y = padTop + (availH - bboxH * scale) / 2 - minY * scale;
+
+  return { x, y, scale };
+}
+
 export function CanvasArea({
   nodes,
   foldedEdges,
+  rawEdges,
   selectedId,
   hoveredId,
   activeCategory = null,
   categories = [],
   highlightedPaths = null,
+  activeWalkType = null,
   onSelectId,
   onHoverId,
   onToggleNodeOpen,
 }: CanvasAreaProps) {
-  // Category lookup for framework-reshaped rail
+  // Manual per-panel scroll overrides; combined with selection-aware auto-centering below
+  const [manualOffsets, setManualOffsets] = useState<
+    Record<string, { offset: number; lastSelectedId: string | null; topologyKey: string }>
+  >({});
+
+  // Category lookup and file -> swatch color map
   const activeCategoryObj = useMemo(() => {
     if (!activeCategory || categories.length === 0) return null;
     return categories.find((c) => c.name === activeCategory) || null;
   }, [activeCategory, categories]);
 
+  const activeCategoryFiles = useMemo(() => {
+    if (!activeCategoryObj) return null;
+    return new Set<string>(activeCategoryObj.files);
+  }, [activeCategoryObj]);
+
+  const fileColorMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const cat of categories) {
+      for (const filePath of cat.files) {
+        map.set(filePath, cat.color);
+      }
+    }
+    return map;
+  }, [categories]);
+
   const fileMatchesActiveCategory = useCallback(
     (file: { path: string; extension: string }) => {
       if (!activeCategory) return true;
-      if (activeCategoryObj) {
-        return activeCategoryObj.files.includes(file.path);
+      if (activeCategoryFiles) {
+        return activeCategoryFiles.has(file.path);
       }
       return file.extension === activeCategory;
     },
-    [activeCategory, activeCategoryObj]
+    [activeCategory, activeCategoryFiles]
   );
-  // Pan and zoom state
-  const [transform, setTransform] = React.useState({ x: 60, y: 40, scale: 0.85 });
-  const isDraggingRef = useRef(false);
-  const dragStartRef = useRef({ x: 0, y: 0 });
-  const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // Node lookup map
+  // Fallback synthesis if a caller supplies only foldedEdges without rawEdges
+  const effectiveRawEdges: ParsedEdge[] = useMemo(() => {
+    if (rawEdges) return rawEdges;
+    const seen = new Set<string>();
+    const synthesized: ParsedEdge[] = [];
+    for (const fe of foldedEdges) {
+      for (const pair of fe.filePairs) {
+        const key = `${pair.sourcePath}->${pair.targetPath}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          synthesized.push({
+            sourcePath: pair.sourcePath,
+            targetPath: pair.targetPath,
+            kind: 'import',
+            specifier: pair.targetPath,
+          });
+        }
+      }
+    }
+    return synthesized;
+  }, [rawEdges, foldedEdges]);
+
+  // Pan and zoom state
+  const [transform, setTransform] = useState({ x: 48, y: 76, scale: 0.85 });
+  const isDraggingRef = useRef(false);
+  const didDragRef = useRef(false);
+  const dragOriginRef = useRef({ clientX: 0, clientY: 0, startX: 0, startY: 0 });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const fittedTopologyKeyRef = useRef<string | null>(null);
+  const prevOpenIdsRef = useRef<Set<string>>(new Set());
+
+  // Node lookup maps
   const nodeMap = useMemo(() => {
     return new Map<string, FoldedNode>(nodes.map((n) => [n.id, n]));
   }, [nodes]);
 
-  // Find containing node ID for hoveredId (if hoveredId is a file path)
+  const fileCountMap = useMemo(() => {
+    return new Map<string, number>(nodes.map((n) => [n.id, n.files.length]));
+  }, [nodes]);
+
+  const topologyKey = useMemo(
+    () => nodes.map((n) => n.id).sort().join('|'),
+    [nodes]
+  );
+
+  const openIdsKey = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.isOpen)
+        .map((n) => n.id)
+        .sort()
+        .join('|'),
+    [nodes]
+  );
+
+  // Derive active row offsets per open panel without triggering synchronous effect setState
+  const panelOffsets = useMemo<Record<string, number>>(() => {
+    const result: Record<string, number> = {};
+    for (const node of nodes) {
+      if (!node.isOpen || node.files.length <= PANEL_MAX_VISIBLE_ROWS) {
+        result[node.id] = 0;
+        continue;
+      }
+      const maxOffset = node.files.length - PANEL_MAX_VISIBLE_ROWS;
+      const entry = manualOffsets[node.id];
+      const baseOffset =
+        entry && entry.topologyKey === topologyKey
+          ? Math.min(maxOffset, Math.max(0, entry.offset))
+          : 0;
+
+      if (
+        selectedId &&
+        (!entry ||
+          entry.lastSelectedId !== selectedId ||
+          entry.topologyKey !== topologyKey)
+      ) {
+        const idx = node.files.findIndex((f) => f.path === selectedId);
+        if (
+          idx >= 0 &&
+          (idx < baseOffset || idx >= baseOffset + PANEL_MAX_VISIBLE_ROWS)
+        ) {
+          result[node.id] = Math.min(
+            maxOffset,
+            Math.max(0, idx - Math.floor(PANEL_MAX_VISIBLE_ROWS / 2))
+          );
+          continue;
+        }
+      }
+
+      result[node.id] = baseOffset;
+    }
+    return result;
+  }, [nodes, manualOffsets, topologyKey, selectedId]);
+
+  const latestOffsetsRef = useRef<Record<string, number>>({});
+  const selectedIdRef = useRef<string | null>(selectedId);
+  const topologyKeyRef = useRef<string>(topologyKey);
+
+  useEffect(() => {
+    latestOffsetsRef.current = panelOffsets;
+    selectedIdRef.current = selectedId;
+    topologyKeyRef.current = topologyKey;
+  }, [panelOffsets, selectedId, topologyKey]);
+
+  // Initial fit + zoom-out-only post-expansion refit (docs/specs/phase-04.md)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || nodes.length === 0) return;
+
+    const currentOpenIds = new Set(
+      nodes.filter((n) => n.isOpen).map((n) => n.id)
+    );
+    const newlyOpenedNodes = nodes.filter(
+      (n) => n.isOpen && !prevOpenIdsRef.current.has(n.id)
+    );
+    prevOpenIdsRef.current = currentOpenIds;
+
+    const isNewTopology = fittedTopologyKeyRef.current !== topologyKey;
+    if (!isNewTopology && newlyOpenedNodes.length === 0) {
+      return;
+    }
+
+    const rafId = window.requestAnimationFrame(() => {
+      const vw = el.clientWidth;
+      const vh = el.clientHeight;
+      if (vw <= 0 || vh <= 0) return;
+
+      const fit = computeFitTransform(nodes, vw, vh);
+      if (isNewTopology) {
+        fittedTopologyKeyRef.current = topologyKey;
+        setTransform(fit);
+        return;
+      }
+
+      setTransform((prev) => {
+        const nextScale = Math.min(prev.scale, fit.scale);
+        if (nextScale < prev.scale) {
+          return { x: fit.x, y: fit.y, scale: nextScale };
+        }
+
+        let nextX = prev.x;
+        let nextY = prev.y;
+        const padX = 48;
+        const padTop = 36;
+        const padBottom = 56;
+
+        for (const opened of newlyOpenedNodes) {
+          const left = opened.x * nextScale + nextX;
+          const right = (opened.x + opened.width) * nextScale + nextX;
+          const top = opened.y * nextScale + nextY;
+          const bottom = (opened.y + opened.height) * nextScale + nextY;
+
+          if (right > vw - padX) {
+            nextX -= right - (vw - padX);
+          }
+          if (left < padX) {
+            nextX += padX - left;
+          }
+          if (bottom > vh - padBottom) {
+            nextY -= bottom - (vh - padBottom);
+          }
+          if (top < padTop) {
+            nextY += padTop - top;
+          }
+        }
+
+        if (nextX === prev.x && nextY === prev.y && nextScale === prev.scale) {
+          return prev;
+        }
+        return { x: nextX, y: nextY, scale: nextScale };
+      });
+    });
+
+    return () => window.cancelAnimationFrame(rafId);
+  }, [nodes, topologyKey, openIdsKey]);
+
+  // Non-passive wheel: scrolls overflowed open panels or zooms canvas anchored on cursor
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+
+      const panelEl = (e.target as HTMLElement | null)?.closest(
+        '[data-scrollable-panel]'
+      ) as HTMLElement | null;
+
+      if (panelEl) {
+        const panelId = panelEl.getAttribute('data-scrollable-panel');
+        const total = panelId ? fileCountMap.get(panelId) ?? 0 : 0;
+        if (panelId && total > PANEL_MAX_VISIBLE_ROWS) {
+          const maxOffset = total - PANEL_MAX_VISIBLE_ROWS;
+          const step = e.deltaY > 0 ? 3 : -3;
+          const curVisible = latestOffsetsRef.current[panelId] ?? 0;
+          const topo = topologyKeyRef.current;
+          const curSel = selectedIdRef.current;
+          setManualOffsets((prev) => {
+            const existing = prev[panelId];
+            const base =
+              existing && existing.topologyKey === topo
+                ? existing.offset
+                : curVisible;
+            const next = Math.min(maxOffset, Math.max(0, base + step));
+            return {
+              ...prev,
+              [panelId]: {
+                offset: next,
+                lastSelectedId: curSel,
+                topologyKey: topo,
+              },
+            };
+          });
+          return;
+        }
+      }
+
+      const rect = el.getBoundingClientRect();
+      const pointerX = e.clientX - rect.left;
+      const pointerY = e.clientY - rect.top;
+      const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
+
+      setTransform((prev) => {
+        const nextScale = Math.min(2.0, Math.max(0.2, prev.scale * zoomFactor));
+        if (nextScale === prev.scale) return prev;
+        const ratio = nextScale / prev.scale;
+        return {
+          scale: nextScale,
+          x: pointerX - (pointerX - prev.x) * ratio,
+          y: pointerY - (pointerY - prev.y) * ratio,
+        };
+      });
+    };
+
+    const onWindowMouseUp = () => {
+      isDraggingRef.current = false;
+    };
+
+    el.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+    };
+  }, [fileCountMap]);
+
+  // Resolve file-level & panel-level visual edges + attached row port sides
+  const { visualEdges, portSides } = useMemo(
+    () => resolveVisualEdges(nodes, effectiveRawEdges, panelOffsets),
+    [nodes, effectiveRawEdges, panelOffsets]
+  );
+
+  // Hover state helpers
+  const hoveredNodeId = hoveredId && nodeMap.has(hoveredId) ? hoveredId : null;
   const hoveredContainingNodeId = useMemo(() => {
     if (!hoveredId) return null;
     if (nodeMap.has(hoveredId)) return hoveredId;
@@ -93,12 +409,28 @@ export function CanvasArea({
     return node ? node.id : null;
   }, [hoveredId, nodeMap, nodes]);
 
-  // Connected nodes, files, and edges calculation for selection highlighting
+  const isEdgeHovered = useCallback(
+    (edge: VisualEdge): boolean => {
+      if (!hoveredId) return false;
+      if (hoveredNodeId) {
+        return (
+          edge.sourceNodeId === hoveredNodeId ||
+          edge.targetNodeId === hoveredNodeId
+        );
+      }
+      return edge.filePairs.some(
+        (p) => p.sourcePath === hoveredId || p.targetPath === hoveredId
+      );
+    },
+    [hoveredId, hoveredNodeId]
+  );
+
+  // Selection isolation & directional classification over visualEdges
   const activeSelection = useMemo(() => {
     if (!selectedId && !highlightedPaths) return null;
 
     const connectedNodes = new Set<string>();
-    const connectedEdges = new Set<string>();
+    const connectedEdges = new Map<string, 'in' | 'out' | 'active'>();
     const connectedFiles = new Set<string>();
 
     if (highlightedPaths && selectedId) {
@@ -113,14 +445,21 @@ export function CanvasArea({
         }
       }
 
-      for (const edge of foldedEdges) {
-        const matchesEdge = edge.filePairs.some(
+      const walkDir: 'in' | 'out' | 'active' =
+        activeWalkType === 'blast_radius'
+          ? 'in'
+          : activeWalkType === 'dependency_chain'
+          ? 'out'
+          : 'active';
+
+      for (const edge of visualEdges) {
+        const matches = edge.filePairs.some(
           (pair) =>
             connectedFiles.has(pair.sourcePath) &&
             connectedFiles.has(pair.targetPath)
         );
-        if (matchesEdge) {
-          connectedEdges.add(edge.id);
+        if (matches) {
+          connectedEdges.set(edge.id, walkDir);
         }
       }
 
@@ -144,16 +483,22 @@ export function CanvasArea({
         connectedFiles.add(f.path);
       }
 
-      for (const edge of foldedEdges) {
-        if (edge.sourceNodeId === selectedId) {
-          connectedEdges.add(edge.id);
+      for (const edge of visualEdges) {
+        if (edge.isIntraNode && edge.sourceNodeId === selectedId) {
+          connectedEdges.set(edge.id, 'active');
+          for (const pair of edge.filePairs) {
+            connectedFiles.add(pair.sourcePath);
+            connectedFiles.add(pair.targetPath);
+          }
+        } else if (edge.sourceNodeId === selectedId) {
+          connectedEdges.set(edge.id, 'out');
           connectedNodes.add(edge.targetNodeId);
           for (const pair of edge.filePairs) {
             connectedFiles.add(pair.sourcePath);
             connectedFiles.add(pair.targetPath);
           }
         } else if (edge.targetNodeId === selectedId) {
-          connectedEdges.add(edge.id);
+          connectedEdges.set(edge.id, 'in');
           connectedNodes.add(edge.sourceNodeId);
           for (const pair of edge.filePairs) {
             connectedFiles.add(pair.sourcePath);
@@ -162,41 +507,41 @@ export function CanvasArea({
         }
       }
     } else {
-      // Selected is a file path: find its containing node
       connectedFiles.add(selectedId);
-      let containingNodeId: string | null = null;
       for (const n of nodes) {
         if (n.files.some((f) => f.path === selectedId)) {
-          containingNodeId = n.id;
+          connectedNodes.add(n.id);
           break;
         }
       }
 
-      if (containingNodeId) {
-        connectedNodes.add(containingNodeId);
-      }
+      for (const edge of visualEdges) {
+        const matchingPairs: Array<{ sourcePath: string; targetPath: string }> =
+          edge.filePairs.filter(
+            (pair: { sourcePath: string; targetPath: string }) =>
+              pair.sourcePath === selectedId || pair.targetPath === selectedId
+          );
+        if (matchingPairs.length === 0) continue;
 
-      // Check all folded edges and their concrete file pairs
-      for (const edge of foldedEdges) {
-        const matchesEdge = edge.filePairs.some(
-          (pair) =>
-            pair.sourcePath === selectedId || pair.targetPath === selectedId
-        );
+        connectedNodes.add(edge.sourceNodeId);
+        connectedNodes.add(edge.targetNodeId);
 
-        if (matchesEdge) {
-          connectedEdges.add(edge.id);
-          connectedNodes.add(edge.sourceNodeId);
-          connectedNodes.add(edge.targetNodeId);
-
-          for (const pair of edge.filePairs) {
-            if (pair.sourcePath === selectedId) {
-              connectedFiles.add(pair.targetPath);
-            }
-            if (pair.targetPath === selectedId) {
-              connectedFiles.add(pair.sourcePath);
-            }
+        let hasOut = false;
+        let hasIn = false;
+        for (const pair of matchingPairs) {
+          if (pair.sourcePath === selectedId) {
+            hasOut = true;
+            connectedFiles.add(pair.targetPath);
+          }
+          if (pair.targetPath === selectedId) {
+            hasIn = true;
+            connectedFiles.add(pair.sourcePath);
           }
         }
+
+        const dir: 'in' | 'out' | 'active' =
+          hasIn && hasOut ? 'active' : hasIn ? 'in' : 'out';
+        connectedEdges.set(edge.id, dir);
       }
     }
 
@@ -207,25 +552,18 @@ export function CanvasArea({
       selectedId,
       isNodeSelected,
     };
-  }, [selectedId, highlightedPaths, nodeMap, foldedEdges, nodes]);
+  }, [selectedId, highlightedPaths, activeWalkType, nodeMap, visualEdges, nodes]);
 
-  // Helper to resolve the Y coordinate of a connection point on a node
-  const getNodeConnectionY = useCallback(
-    (node: FoldedNode, targetFile?: string): number => {
-      if (!node.isOpen || !targetFile) {
-        return node.y + node.height / 2;
-      }
-
-      const visibleFiles = node.files.slice(0, 10);
-      const idx = visibleFiles.findIndex((f) => f.path === targetFile);
-      if (idx >= 0) {
-        // 32px panel header + 4px padding + idx * 24px row center
-        return node.y + 32 + 4 + idx * 24 + 12;
-      }
-
-      return node.y + node.height / 2;
+  const edgeMatchesCategory = useCallback(
+    (edge: VisualEdge): boolean => {
+      if (!activeCategoryFiles) return true;
+      return edge.filePairs.some(
+        (p) =>
+          activeCategoryFiles.has(p.sourcePath) ||
+          activeCategoryFiles.has(p.targetPath)
+      );
     },
-    []
+    [activeCategoryFiles]
   );
 
   // Pan interactions
@@ -234,18 +572,26 @@ export function CanvasArea({
     if ((e.target as HTMLElement).closest('button, [data-interactive="true"]'))
       return;
     isDraggingRef.current = true;
-    dragStartRef.current = {
-      x: e.clientX - transform.x,
-      y: e.clientY - transform.y,
+    didDragRef.current = false;
+    dragOriginRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      startX: transform.x,
+      startY: transform.y,
     };
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!isDraggingRef.current) return;
+    const dx = e.clientX - dragOriginRef.current.clientX;
+    const dy = e.clientY - dragOriginRef.current.clientY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) {
+      didDragRef.current = true;
+    }
     setTransform((prev) => ({
       ...prev,
-      x: e.clientX - dragStartRef.current.x,
-      y: e.clientY - dragStartRef.current.y,
+      x: dragOriginRef.current.startX + dx,
+      y: dragOriginRef.current.startY + dy,
     }));
   };
 
@@ -253,52 +599,90 @@ export function CanvasArea({
     isDraggingRef.current = false;
   };
 
-  // Zoom with mouse wheel
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const zoomFactor = e.deltaY < 0 ? 1.08 : 0.92;
-    setTransform((prev) => {
-      const newScale = Math.min(2.0, Math.max(0.3, prev.scale * zoomFactor));
-      return { ...prev, scale: newScale };
-    });
-  };
-
-  // Canvas bounds computation for SVG viewBox
+  // Canvas bounds computation for SVG viewBox (accommodates right-side intra-panel loops)
   const svgBounds = useMemo(() => {
     let maxX = 1200;
     let maxY = 800;
     for (const n of nodes) {
-      maxX = Math.max(maxX, n.x + n.width + 200);
-      maxY = Math.max(maxY, n.y + n.height + 200);
+      maxX = Math.max(maxX, n.x + n.width + 260);
+      maxY = Math.max(maxY, n.y + n.height + 220);
     }
     return { width: maxX, height: maxY };
   }, [nodes]);
 
-  // Center & Fit View button
   const fitView = useCallback(() => {
-    setTransform({ x: 60, y: 60, scale: 0.75 });
-  }, []);
+    const el = containerRef.current;
+    if (!el || nodes.length === 0) return;
+    setTransform(computeFitTransform(nodes, el.clientWidth, el.clientHeight));
+  }, [nodes]);
+
+  const scrollPanel = useCallback(
+    (nodeId: string, totalFiles: number, delta: number) => {
+      const maxOffset = Math.max(0, totalFiles - PANEL_MAX_VISIBLE_ROWS);
+      const curVisible = latestOffsetsRef.current[nodeId] ?? 0;
+      const topo = topologyKey;
+      const curSel = selectedId;
+      setManualOffsets((prev) => {
+        const existing = prev[nodeId];
+        const base =
+          existing && existing.topologyKey === topo
+            ? Math.min(maxOffset, Math.max(0, existing.offset))
+            : curVisible;
+        const next = Math.min(maxOffset, Math.max(0, base + delta));
+        return {
+          ...prev,
+          [nodeId]: {
+            offset: next,
+            lastSelectedId: curSel,
+            topologyKey: topo,
+          },
+        };
+      });
+    },
+    [topologyKey, selectedId]
+  );
+
+  // Split background vs foreground SVG edges cleanly
+  const backgroundEdges: VisualEdge[] = [];
+  const foregroundEdges: Array<{ edge: VisualEdge; dir: 'in' | 'out' | 'active'; hovered: boolean }> = [];
+
+  for (const edge of visualEdges) {
+    const hovered = isEdgeHovered(edge);
+    const activeDir = activeSelection?.connectedEdges.get(edge.id);
+    if (hovered || activeDir) {
+      foregroundEdges.push({
+        edge,
+        dir: hovered ? 'active' : activeDir!,
+        hovered,
+      });
+    } else {
+      backgroundEdges.push(edge);
+    }
+  }
 
   return (
     <main
       ref={containerRef}
-      className="flex-1 min-w-0 h-full relative overflow-hidden bg-[#06070a] select-none cursor-grab active:cursor-grabbing"
+      className="flex-1 min-w-0 h-full relative overflow-hidden bg-[#f8f9fb] dark:bg-[#090a0e] select-none cursor-grab active:cursor-grabbing"
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
-      onWheel={handleWheel}
       onClick={() => {
+        if (didDragRef.current) {
+          didDragRef.current = false;
+          return;
+        }
         onSelectId(null);
         onHoverId(null);
       }}
       aria-label="Dependency Graph Canvas"
     >
-      {/* Background Matrix Texture */}
+      {/* Subtle Background Matrix Texture */}
       <div
-        className="absolute inset-0 pointer-events-none opacity-20"
+        className="absolute inset-0 pointer-events-none opacity-40 dark:opacity-20 text-slate-300 dark:text-white/20"
         style={{
           backgroundImage:
-            'radial-gradient(circle, rgba(255, 255, 255, 0.15) 1px, transparent 1px)',
+            'radial-gradient(circle, currentColor 1px, transparent 1px)',
           backgroundSize: '24px 24px',
         }}
       />
@@ -319,21 +703,6 @@ export function CanvasArea({
           height={svgBounds.height}
         >
           <defs>
-            <linearGradient id="edge-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#ffffff" stopOpacity="0.45" />
-              <stop offset="100%" stopColor="#ffffff" stopOpacity="0.15" />
-            </linearGradient>
-            <linearGradient
-              id="edge-grad-active"
-              x1="0%"
-              y1="0%"
-              x2="100%"
-              y2="0%"
-            >
-              <stop offset="0%" stopColor="#38bdf8" stopOpacity="1" />
-              <stop offset="50%" stopColor="#60a5fa" stopOpacity="1" />
-              <stop offset="100%" stopColor="#38bdf8" stopOpacity="1" />
-            </linearGradient>
             <filter
               id="edge-glow"
               x="-20%"
@@ -344,146 +713,75 @@ export function CanvasArea({
               <feDropShadow
                 dx="0"
                 dy="0"
-                stdDeviation="3"
+                stdDeviation="2.2"
                 floodColor="#38bdf8"
-                floodOpacity="0.9"
+                floodOpacity="0.55"
               />
             </filter>
           </defs>
 
-          {/* Render Inactive / Dimmed Edges first */}
-          {foldedEdges
-            .filter(
-              (edge) =>
-                !activeSelection ||
-                !activeSelection.connectedEdges.has(edge.id)
-            )
-            .map((edge) => {
-              const src = nodeMap.get(edge.sourceNodeId);
-              const tgt = nodeMap.get(edge.targetNodeId);
-              if (!src || !tgt) return null;
+          {/* Pass 1: Resting / Dimmed Monochrome Edges */}
+          {backgroundEdges.map((edge) => {
+            const catMatch = edgeMatchesCategory(edge);
+            const isDim = Boolean(activeSelection) || !catMatch;
+            const restingOpacity = isDim
+              ? 0.09
+              : Math.min(0.76, 0.34 + Math.log2(edge.weight + 1) * 0.11);
+            const restingWidth = isDim
+              ? 1
+              : Math.min(2.1, Math.max(1.05, 0.85 + Math.log2(edge.weight + 1) * 0.28));
 
-              // Check if edge is hovered via hoveredId
-              const isHoveredEdge = Boolean(
-                hoveredId &&
-                  edge.filePairs.some(
-                    (p) =>
-                      p.sourcePath === hoveredId ||
-                      p.targetPath === hoveredId ||
-                      (hoveredContainingNodeId &&
-                        (edge.sourceNodeId === hoveredContainingNodeId ||
-                          edge.targetNodeId === hoveredContainingNodeId))
-                  )
-              );
+            return (
+              <path
+                key={edge.id}
+                d={edge.pathData}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={restingWidth}
+                opacity={restingOpacity}
+                className={
+                  isDim
+                    ? 'text-slate-400 dark:text-slate-600'
+                    : 'text-slate-600 dark:text-slate-200'
+                }
+              />
+            );
+          })}
 
-              const x1 = src.x + src.width;
-              const y1 = getNodeConnectionY(src);
-              const x2 = tgt.x;
-              const y2 = getNodeConnectionY(tgt);
+          {/* Pass 2: Active / Selected / Hovered Edges on Top */}
+          {foregroundEdges.map(({ edge, dir, hovered }) => {
+            const colorClass = hovered
+              ? 'text-sky-600 dark:text-sky-400'
+              : dir === 'in'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : dir === 'out'
+              ? 'text-amber-600 dark:text-amber-400'
+              : 'text-sky-600 dark:text-sky-400';
 
-              const dx = Math.max(40, (x2 - x1) * 0.5);
-              const pathData = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-
-              return (
-                <path
-                  key={edge.id}
-                  d={pathData}
-                  fill="none"
-                  stroke={isHoveredEdge ? 'url(#edge-grad-active)' : 'url(#edge-grad)'}
-                  strokeWidth={
-                    isHoveredEdge
-                      ? 2.5
-                      : activeSelection
-                      ? 1
-                      : Math.min(2.5, Math.max(1, Math.log2(edge.count + 1)))
-                  }
-                  filter={isHoveredEdge ? 'url(#edge-glow)' : undefined}
-                  opacity={
-                    isHoveredEdge
-                      ? 1.0
-                      : activeSelection
-                      ? 0.03
-                      : 0.35
-                  }
-                  className="transition-opacity duration-200"
-                />
-              );
-            })}
-
-          {/* Render Active / Connected Edges on top with bright glow */}
-          {foldedEdges
-            .filter(
-              (edge) =>
-                activeSelection &&
-                activeSelection.connectedEdges.has(edge.id)
-            )
-            .map((edge) => {
-              const src = nodeMap.get(edge.sourceNodeId);
-              const tgt = nodeMap.get(edge.targetNodeId);
-              if (!src || !tgt) return null;
-
-              // Find matching file pair to reconnect edge directly to row
-              const activePair =
-                activeSelection && !activeSelection.isNodeSelected
-                  ? edge.filePairs.find(
-                      (p) =>
-                        p.sourcePath === activeSelection.selectedId ||
-                        p.targetPath === activeSelection.selectedId
-                    )
-                  : null;
-
-              // Hovered edge detection
-              const isHoveredEdge = Boolean(
-                hoveredId &&
-                  edge.filePairs.some(
-                    (p) =>
-                      p.sourcePath === hoveredId ||
-                      p.targetPath === hoveredId ||
-                      (selectedId &&
-                        ((p.sourcePath === selectedId &&
-                          p.targetPath === hoveredId) ||
-                          (p.sourcePath === hoveredId &&
-                            p.targetPath === selectedId)))
-                  )
-              );
-
-              const x1 = src.x + src.width;
-              const y1 = activePair
-                ? getNodeConnectionY(src, activePair.sourcePath)
-                : getNodeConnectionY(src);
-
-              const x2 = tgt.x;
-              const y2 = activePair
-                ? getNodeConnectionY(tgt, activePair.targetPath)
-                : getNodeConnectionY(tgt);
-
-              const dx = Math.max(40, (x2 - x1) * 0.5);
-              const pathData = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-
-              return (
-                <g key={edge.id} className="transition-all duration-200">
-                  <path
-                    d={pathData}
-                    fill="none"
-                    stroke="url(#edge-grad-active)"
-                    strokeWidth={isHoveredEdge ? 3.5 : 2.5}
-                    filter="url(#edge-glow)"
-                    opacity={1.0}
-                  />
-                </g>
-              );
-            })}
+            return (
+              <path
+                key={edge.id}
+                d={edge.pathData}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={hovered ? 2.6 : 2.0}
+                filter={hovered ? 'url(#edge-glow)' : undefined}
+                opacity={hovered ? 1.0 : 0.92}
+                className={colorClass}
+              />
+            );
+          })}
         </svg>
 
-        {/* HTML Nodes Layer */}
+        {/* HTML Nodes & Open Panel Cards Layer */}
         {nodes.map((node) => {
           const isDirectlySelected = selectedId === node.id;
-          const isNodeConnected =
-            activeSelection && activeSelection.connectedNodes.has(node.id);
+          const isNodeConnected = Boolean(
+            activeSelection && activeSelection.connectedNodes.has(node.id)
+          );
           const isNodeActive =
             !activeSelection || isNodeConnected || isDirectlySelected;
 
-          // Phase 6 & Phase 8 Category Filtering: Match count for this folder panel
           const matchingCategoryCount = activeCategory
             ? node.files.filter(fileMatchesActiveCategory).length
             : node.files.length;
@@ -494,238 +792,349 @@ export function CanvasArea({
           const isDimmed =
             (activeSelection && !isNodeActive) || isCategoryDimmed;
 
-          // Bidirectional hover state: node is hovered or contains hovered file
           const isHovered =
-            hoveredId === node.id || hoveredContainingNodeId === node.id;
+            hoveredId === node.id ||
+            (!node.isOpen && hoveredContainingNodeId === node.id);
+
+          const directCount = node.files.reduce(
+            (acc, f) => acc + (f.folder === node.id ? 1 : 0),
+            0
+          );
+          const displayNumerator = activeCategory
+            ? matchingCategoryCount
+            : directCount;
+
+          if (!node.isOpen) {
+            return (
+              <div
+                key={node.id}
+                data-interactive="true"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectId(node.id);
+                  onToggleNodeOpen(node.id);
+                }}
+                onMouseEnter={() => onHoverId(node.id)}
+                onMouseLeave={() => onHoverId(null)}
+                style={{
+                  position: 'absolute',
+                  left: node.x,
+                  top: node.y,
+                  width: node.width,
+                  height: node.height,
+                }}
+                className={`rounded-md border font-mono transition-colors duration-150 ${
+                  isHovered
+                    ? 'border-primary ring-1 ring-primary/70 bg-accent/80 shadow-lg opacity-100 z-30'
+                    : isDirectlySelected
+                    ? 'border-primary ring-1 ring-primary/60 bg-accent/60 shadow-md opacity-100 z-20'
+                    : isNodeConnected
+                    ? 'border-foreground/50 bg-card shadow-sm opacity-100 z-10'
+                    : isDimmed
+                    ? 'opacity-20 border-border/50 bg-card/60'
+                    : 'border-border/90 hover:border-foreground/50 bg-card shadow-sm'
+                }`}
+                title="Click to open folder into its files"
+              >
+                <div className="h-full w-full px-2.5 py-2 flex flex-col justify-center gap-1 cursor-pointer">
+                  <div
+                    className={`text-[11px] font-semibold truncate tracking-tight leading-tight ${
+                      isDimmed ? 'text-muted-foreground' : 'text-foreground'
+                    }`}
+                  >
+                    {node.label}
+                  </div>
+
+                  <div
+                    className={`flex items-center justify-between gap-2 text-[9px] tabular-nums leading-none ${
+                      isDimmed
+                        ? 'text-muted-foreground/60'
+                        : activeCategory && matchingCategoryCount > 0
+                        ? 'text-primary font-medium'
+                        : 'text-muted-foreground'
+                    }`}
+                  >
+                    <span className="truncate">
+                      {displayNumerator}/{node.files.length} files
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap text-muted-foreground">
+                      <span>→ {node.fanIn}</span>
+                      <span>{node.fanOut} →</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
+          // Open Folder Panel View
+          const openOffset = panelOffsets[node.id] ?? 0;
+          const openWin = computeOpenPanelWindow(node.files.length, openOffset);
+          const visibleFiles = node.files.slice(
+            openWin.offset,
+            openWin.offset + openWin.visibleCount
+          );
+
+          const aboveKey = `above:${node.id}`;
+          const belowKey = `below:${node.id}`;
+          const abovePorts = portSides.get(aboveKey);
+          const belowPorts = portSides.get(belowKey);
+
+          const hasAboveHighlight =
+            Boolean(
+              hoveredId &&
+                node.files
+                  .slice(0, openWin.offset)
+                  .some((f) => f.path === hoveredId)
+            ) ||
+            Boolean(
+              selectedId &&
+                node.files
+                  .slice(0, openWin.offset)
+                  .some((f) => f.path === selectedId)
+            );
+
+          const hasBelowHighlight =
+            Boolean(
+              hoveredId &&
+                node.files
+                  .slice(openWin.offset + openWin.visibleCount)
+                  .some((f) => f.path === hoveredId)
+            ) ||
+            Boolean(
+              selectedId &&
+                node.files
+                  .slice(openWin.offset + openWin.visibleCount)
+                  .some((f) => f.path === selectedId)
+            );
 
           return (
             <div
               key={node.id}
               data-interactive="true"
+              data-scrollable-panel={node.id}
               onClick={(e) => {
+                // Keep click inside open panel from clearing canvas selection
                 e.stopPropagation();
-                // Select and open the node
-                onSelectId(selectedId === node.id ? null : node.id);
-                if (!node.isOpen) {
-                  onToggleNodeOpen(node.id);
-                }
               }}
-              onMouseEnter={() => onHoverId(node.id)}
-              onMouseLeave={() => onHoverId(null)}
               style={{
                 position: 'absolute',
                 left: node.x,
                 top: node.y,
                 width: node.width,
-                height: node.height,
+                height: openWin.height,
               }}
-              className={`rounded-lg border font-mono transition-all duration-200 shadow-xl ${
+              className={`rounded-md border font-mono transition-colors duration-150 shadow-xl ${
                 isHovered
-                  ? 'border-[#38bdf8] ring-2 ring-[#38bdf8] bg-[#0d1527] shadow-[0_0_28px_rgba(56,189,248,0.45)] opacity-100 z-30'
+                  ? 'border-primary ring-1 ring-primary/60 bg-card z-30 opacity-100'
                   : isDirectlySelected
-                  ? 'border-[#38bdf8] ring-2 ring-[#38bdf8]/60 bg-[#0d1527] shadow-[0_0_30px_rgba(56,189,248,0.35)] opacity-100 z-20'
+                  ? 'border-foreground/50 bg-card z-20 opacity-100'
                   : isNodeConnected
-                  ? 'border-white/80 bg-[#121624] shadow-[0_0_18px_rgba(255,255,255,0.12)] opacity-100 z-10'
+                  ? 'border-foreground/40 bg-card z-20 opacity-100'
                   : isDimmed
-                  ? 'opacity-15 border-white/5 bg-[#090a0f]/40 grayscale'
-                  : 'border-white/15 hover:border-white/40 bg-[#0c0d14]/95 opacity-90'
+                  ? 'opacity-25 border-border/50 bg-card/70'
+                  : 'border-border/90 bg-card z-20'
               }`}
             >
-              {/* Folded Box View */}
-              {!node.isOpen ? (
+              <div className="h-full w-full flex flex-col">
+                {/* Panel Header (click closes panel back to single box & preserves selection) */}
                 <div
-                  className="h-full w-full p-2.5 flex flex-col justify-between cursor-pointer group"
+                  style={{ height: PANEL_HEADER_H }}
+                  className={`shrink-0 border-b px-2.5 flex flex-col justify-center gap-0.5 cursor-pointer rounded-t-md transition-colors ${
+                    isDirectlySelected || isHovered
+                      ? 'bg-secondary/90 border-border'
+                      : 'bg-secondary/50 border-border/80 hover:bg-secondary/80'
+                  }`}
+                  onMouseEnter={() => onHoverId(node.id)}
+                  onMouseLeave={() => onHoverId(null)}
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Opens into rows and selects the folder
-                    onSelectId(node.id);
                     onToggleNodeOpen(node.id);
+                    onSelectId(node.id);
                   }}
-                  title="Click to open folder panel"
+                  title="Click header to fold folder back"
                 >
-                  <div className="flex items-center justify-between gap-1.5">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <Folder
-                        className={`w-3.5 h-3.5 shrink-0 transition-colors ${
-                          isDimmed
-                            ? 'text-white/20'
-                            : isDirectlySelected || isNodeConnected || isHovered
-                            ? 'text-[#38bdf8]'
-                            : 'text-white/50 group-hover:text-white'
-                        }`}
-                      />
-                      <span
-                        className={`text-[11px] font-semibold truncate tracking-tight ${
-                          isDimmed ? 'text-white/25' : 'text-white'
-                        }`}
-                      >
-                        {node.label}
-                      </span>
-                    </div>
-
-                    {activeCategory ? (
-                      <span
-                        className={`text-[9px] px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                          matchingCategoryCount > 0
-                            ? 'bg-[#38bdf8]/20 text-[#38bdf8]'
-                            : 'bg-white/[0.02] text-white/20'
-                        }`}
-                      >
-                        {matchingCategoryCount}
-                      </span>
-                    ) : (
-                      <span
-                        className={`text-[9px] px-1 py-0.5 rounded shrink-0 ${
-                          isDimmed
-                            ? 'bg-white/[0.02] text-white/20'
-                            : isDirectlySelected || isHovered
-                            ? 'bg-[#38bdf8]/20 text-[#38bdf8] font-bold'
-                            : 'bg-white/[0.08] text-white/60'
-                        }`}
-                      >
-                        {node.files.length}
-                      </span>
-                    )}
+                  <div className="text-[11px] font-semibold text-foreground truncate leading-tight">
+                    {node.label}
                   </div>
-
-                  <div
-                    className={`flex items-center justify-between text-[9px] pt-1 border-t ${
-                      isDimmed
-                        ? 'border-white/[0.02] text-white/15'
-                        : isDirectlySelected || isNodeConnected || isHovered
-                        ? 'border-white/20 text-white/70'
-                        : 'border-white/[0.06] text-white/40'
-                    }`}
-                  >
-                    <span>in: {node.fanIn}</span>
-                    <span>out: {node.fanOut}</span>
+                  <div className="flex items-center justify-between gap-2 text-[9px] tabular-nums leading-none">
+                    <span
+                      className={
+                        activeCategory && matchingCategoryCount > 0
+                          ? 'text-primary font-semibold'
+                          : 'text-muted-foreground'
+                      }
+                    >
+                      {activeCategory
+                        ? `${matchingCategoryCount}/${node.files.length} matched`
+                        : `${directCount}/${node.files.length} files`}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 shrink-0 whitespace-nowrap text-muted-foreground">
+                      <span>→ {node.fanIn}</span>
+                      <span>{node.fanOut} →</span>
+                    </span>
                   </div>
                 </div>
-              ) : (
-                /* Opened Panel Box View */
-                <div className="h-full w-full flex flex-col bg-[#0c0d14] rounded-lg overflow-hidden">
-                  {/* Panel Header */}
-                  <div
-                    className={`h-8 shrink-0 border-b px-2.5 flex items-center justify-between cursor-pointer transition-colors ${
-                      isDirectlySelected || isHovered
-                        ? 'bg-[#38bdf8]/15 border-[#38bdf8]/40'
-                        : 'bg-white/[0.04] border-white/15 hover:bg-white/[0.08]'
-                    }`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      // Closes panel back to a single node and keeps it selected
-                      onToggleNodeOpen(node.id);
-                      onSelectId(node.id);
-                    }}
-                    title="Click header to close panel"
-                  >
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <FolderOpen className="w-3.5 h-3.5 text-[#38bdf8] shrink-0" />
-                      <span className="text-[11px] font-bold text-white truncate">
-                        {node.label}
-                      </span>
-                    </div>
 
-                    {/* Phase 6: Match count in header when category filtered */}
-                    {activeCategory ? (
-                      <span className="px-1.5 py-0.5 rounded bg-[#38bdf8]/15 border border-[#38bdf8]/30 text-[#38bdf8] font-bold text-[9px] shrink-0">
-                        {matchingCategoryCount} matched
-                      </span>
-                    ) : (
-                      <div className="flex items-center gap-1 text-[9px] text-white/50 shrink-0">
-                        <span>{node.files.length} files</span>
-                        <span className="text-white/20">·</span>
-                        <span>in:{node.fanIn}</span>
-                      </div>
-                    )}
-                  </div>
+                {/* Exact-stride rows + optional overflow above/below bars */}
+                <div
+                  style={{
+                    paddingTop: PANEL_PADDING_Y,
+                    paddingBottom: PANEL_PADDING_Y,
+                    gap: PANEL_ROW_GAP,
+                  }}
+                  className="flex flex-col px-1.5"
+                >
+                  {openWin.hasAbove && (
+                    <button
+                      type="button"
+                      style={{ height: PANEL_NOTICE_H }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        scrollPanel(node.id, node.files.length, -7);
+                      }}
+                      className={`relative shrink-0 w-full px-2 rounded flex items-center justify-between text-[9.5px] transition-colors cursor-pointer ${
+                        hasAboveHighlight
+                          ? 'bg-primary/15 text-foreground'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60'
+                      }`}
+                      title="Scroll up to view previous files"
+                    >
+                      {abovePorts?.left && (
+                        <span className="absolute -left-[7px] top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-slate-500/85 dark:bg-slate-300/85 pointer-events-none" />
+                      )}
+                      <span>{openWin.aboveCount} files above</span>
+                      <ChevronUp className="w-3 h-3 opacity-60 shrink-0" />
+                      {abovePorts?.right && (
+                        <span className="absolute -right-[7px] top-1/2 translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-slate-500/85 dark:bg-slate-300/85 pointer-events-none" />
+                      )}
+                    </button>
+                  )}
 
-                  {/* Panel Rows (Files) */}
-                  <div className="flex-1 overflow-y-auto p-1 space-y-0.5 divide-y divide-white/[0.03]">
-                    {node.files.slice(0, 10).map((file) => {
-                      const isFileSelected = selectedId === file.path;
-                      const isFileConnected =
-                        activeSelection &&
-                        activeSelection.connectedFiles.has(file.path);
-                      const isFileHovered = hoveredId === file.path;
+                  {visibleFiles.map((file) => {
+                    const isFileSelected = selectedId === file.path;
+                    const isFileConnected = Boolean(
+                      activeSelection &&
+                        activeSelection.connectedFiles.has(file.path)
+                    );
+                    const isFileHovered = hoveredId === file.path;
+                    const matchesCategory = fileMatchesActiveCategory(file);
 
-                      // Phase 6 & Phase 8: Category match check
-                      const matchesCategory = fileMatchesActiveCategory(file);
+                    const isRowDimmed =
+                      (activeSelection &&
+                        !isFileSelected &&
+                        !isFileConnected &&
+                        !isFileHovered) ||
+                      !matchesCategory;
 
-                      const isRowDimmed =
-                        (activeSelection &&
-                          !isFileSelected &&
-                          !isFileConnected &&
-                          !isFileHovered) ||
-                        !matchesCategory;
+                    const displayName = getRelativeFileName(node.id, file.path);
+                    const dotColor = fileColorMap.get(file.path) || '#64748b';
+                    const rowPorts = portSides.get(`file:${file.path}`);
 
-                      const fileName = file.path.split('/').pop() || file.path;
+                    return (
+                      <div
+                        key={file.path}
+                        data-interactive="true"
+                        style={{ height: PANEL_ROW_H }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectId(
+                            selectedId === file.path ? null : file.path
+                          );
+                        }}
+                        onMouseEnter={(e) => {
+                          e.stopPropagation();
+                          onHoverId(file.path);
+                        }}
+                        onMouseLeave={() => onHoverId(null)}
+                        title={file.path}
+                        className={`relative shrink-0 flex items-center justify-between gap-2 px-1.5 rounded text-[10px] cursor-pointer transition-colors ${
+                          isFileHovered || isFileSelected
+                            ? 'bg-primary/20 text-foreground font-semibold ring-1 ring-primary'
+                            : isFileConnected
+                            ? 'bg-secondary/90 text-foreground font-medium ring-1 ring-border'
+                            : isRowDimmed
+                            ? 'opacity-25 text-muted-foreground hover:opacity-80'
+                            : 'text-foreground/90 hover:bg-secondary/75 hover:text-foreground'
+                        }`}
+                      >
+                        {rowPorts?.left && (
+                          <span
+                            className={`absolute -left-[7px] top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full pointer-events-none ${
+                              isFileSelected || isFileHovered
+                                ? 'bg-primary'
+                                : 'bg-slate-500/85 dark:bg-slate-300/85'
+                            }`}
+                          />
+                        )}
 
-                      return (
-                        <div
-                          key={file.path}
-                          data-interactive="true"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            // Select this file
-                            onSelectId(
-                              selectedId === file.path ? null : file.path
-                            );
-                          }}
-                          onMouseEnter={() => onHoverId(file.path)}
-                          onMouseLeave={() => onHoverId(null)}
-                          className={`flex items-center justify-between px-2 py-1 rounded text-[10px] cursor-pointer transition-all ${
-                            isFileHovered
-                              ? 'bg-[#38bdf8]/35 text-white font-semibold ring-1 ring-[#38bdf8] shadow-[0_0_12px_rgba(56,189,248,0.4)]'
-                              : isFileSelected
-                              ? 'bg-[#38bdf8]/30 text-white font-semibold ring-1 ring-[#38bdf8] shadow-[0_0_10px_rgba(56,189,248,0.4)]'
-                              : isFileConnected
-                              ? 'bg-white/10 text-[#38bdf8] font-medium ring-1 ring-white/20'
-                              : isRowDimmed
-                              ? 'opacity-20 text-white/25 hover:opacity-80'
-                              : 'text-white/75 hover:bg-white/[0.06] hover:text-white'
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className="w-1.5 h-1.5 rounded-[2px] shrink-0"
+                            style={{ backgroundColor: dotColor }}
+                            aria-hidden="true"
+                          />
+                          <span className="truncate">{displayName}</span>
+                        </div>
+
+                        <span
+                          className={`inline-flex items-center gap-1.5 text-[9px] tabular-nums shrink-0 whitespace-nowrap ${
+                            isFileHovered || isFileSelected || isFileConnected
+                              ? 'text-foreground/85'
+                              : 'text-muted-foreground'
                           }`}
                         >
-                          <div className="flex items-center gap-1.5 min-w-0 pr-1">
-                            <FileCode
-                              className={`w-2.5 h-2.5 shrink-0 ${
-                                isFileHovered || isFileSelected
-                                  ? 'text-[#38bdf8]'
-                                  : isFileConnected
-                                  ? 'text-[#38bdf8]/80'
-                                  : 'text-white/40'
-                              }`}
-                            />
-                            <span className="truncate">{fileName}</span>
-                          </div>
-                          <span
-                            className={`text-[9px] font-mono shrink-0 ${
-                              isFileHovered || isFileSelected || isFileConnected
-                                ? 'text-white/60'
-                                : 'text-white/30'
-                            }`}
-                          >
-                            {file.lines}L
-                          </span>
-                        </div>
-                      );
-                    })}
+                          <span>→ {file.fanIn}</span>
+                          <span>{file.fanOut} →</span>
+                        </span>
 
-                    {node.files.length > 10 && (
-                      <div className="px-2 py-1 text-[9px] text-white/35 text-center italic">
-                        +{node.files.length - 10} more files
+                        {rowPorts?.right && (
+                          <span
+                            className={`absolute -right-[7px] top-1/2 translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full pointer-events-none ${
+                              isFileSelected || isFileHovered
+                                ? 'bg-primary'
+                                : 'bg-slate-500/85 dark:bg-slate-300/85'
+                            }`}
+                          />
+                        )}
                       </div>
-                    )}
-                  </div>
+                    );
+                  })}
+
+                  {openWin.hasBelow && (
+                    <button
+                      type="button"
+                      style={{ height: PANEL_NOTICE_H }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        scrollPanel(node.id, node.files.length, 7);
+                      }}
+                      className={`relative shrink-0 w-full px-2 rounded flex items-center justify-between text-[9.5px] transition-colors cursor-pointer ${
+                        hasBelowHighlight
+                          ? 'bg-primary/15 text-foreground'
+                          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60'
+                      }`}
+                      title="Scroll down to view more files"
+                    >
+                      {belowPorts?.left && (
+                        <span className="absolute -left-[7px] top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-slate-500/85 dark:bg-slate-300/85 pointer-events-none" />
+                      )}
+                      <span>{openWin.belowCount} files below</span>
+                      <ChevronDown className="w-3 h-3 opacity-60 shrink-0" />
+                      {belowPorts?.right && (
+                        <span className="absolute -right-[7px] top-1/2 translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-slate-500/85 dark:bg-slate-300/85 pointer-events-none" />
+                      )}
+                    </button>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
           );
         })}
       </div>
 
       {/* Canvas Zoom & Fit View Controls (Bottom Left) */}
-      <div className="absolute bottom-4 left-4 z-20 flex items-center gap-1 bg-[#0c0d14]/90 border border-white/10 rounded-lg p-1 backdrop-blur-md font-mono shadow-xl">
+      <div className="absolute bottom-4 left-4 z-20 flex items-center gap-1 bg-card/90 border border-border rounded-lg p-1 backdrop-blur-md font-mono shadow-lg">
         <button
           type="button"
           onClick={() =>
@@ -734,7 +1143,7 @@ export function CanvasArea({
               scale: Math.min(2.0, prev.scale * 1.15),
             }))
           }
-          className="p-1.5 rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+          className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
           title="Zoom in"
         >
           <ZoomIn className="w-3.5 h-3.5" />
@@ -745,48 +1154,60 @@ export function CanvasArea({
           onClick={() =>
             setTransform((prev) => ({
               ...prev,
-              scale: Math.max(0.3, prev.scale * 0.85),
+              scale: Math.max(0.2, prev.scale * 0.85),
             }))
           }
-          className="p-1.5 rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+          className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
           title="Zoom out"
         >
           <ZoomOut className="w-3.5 h-3.5" />
         </button>
 
-        <div className="w-px h-3.5 bg-white/10 mx-0.5" />
+        <div className="w-px h-3.5 bg-border mx-0.5" />
 
         <button
           type="button"
           onClick={fitView}
-          className="p-1.5 rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+          className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
           title="Fit view"
         >
           <Maximize2 className="w-3.5 h-3.5" />
         </button>
 
-        <span className="text-[10px] text-white/40 px-1.5">
+        <span className="text-[10px] text-muted-foreground px-1.5 tabular-nums">
           {Math.round(transform.scale * 100)}%
         </span>
       </div>
 
       {/* Canvas Selection Legend / Status (Bottom Right) */}
-      <div className="absolute bottom-4 right-4 z-20 flex items-center gap-2 bg-[#0c0d14]/90 border border-white/10 rounded-lg px-2.5 py-1 backdrop-blur-md font-mono text-[10px] text-white/50">
-        <GitCommit className="w-3 h-3 text-[#38bdf8]" />
+      <div className="absolute bottom-4 right-4 z-20 flex items-center gap-2.5 bg-card/90 border border-border rounded-lg px-2.5 py-1 backdrop-blur-md font-mono text-[10px] text-muted-foreground shadow-lg">
+        <GitCommit className="w-3 h-3 text-primary" />
         {selectedId ? (
-          <span className="text-white flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#38bdf8]" />
-            <span className="truncate max-w-[200px]">
-              {selectedId.split('/').pop()}
+          <span className="text-foreground flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-primary" />
+              <span className="truncate max-w-[180px]">
+                {selectedId.split('/').pop()}
+              </span>
             </span>
-            <span className="text-white/40">
-              ({activeSelection?.connectedNodes.size} nodes,{' '}
-              {activeSelection?.connectedEdges.size} edges)
+            <span className="text-muted-foreground">
+              ({activeSelection?.connectedNodes.size ?? 0} nodes,{' '}
+              {activeSelection?.connectedEdges.size ?? 0} edges)
+            </span>
+            <span className="hidden sm:inline-flex items-center gap-2 pl-1.5 border-l border-border text-[9px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                in
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                out
+              </span>
             </span>
           </span>
         ) : (
           <span>
-            {nodes.length} nodes · {foldedEdges.length} edges
+            {nodes.length} nodes · {visualEdges.length} edges
           </span>
         )}
       </div>

@@ -9,12 +9,14 @@ import type { FrameworkAdapter } from './types.ts';
 import type { DiscoveredFile } from '../types.ts';
 import { nextjsAdapter } from './nextjs.ts';
 import { nestjsAdapter } from './nestjs.ts';
+import { expressAdapter } from './express.ts';
 import { reactAdapter } from './react.ts';
 import { fallbackAdapter } from './fallback.ts';
 
 export const REGISTERED_ADAPTERS: readonly FrameworkAdapter[] = [
   nextjsAdapter,
   nestjsAdapter,
+  expressAdapter,
   reactAdapter,
   fallbackAdapter,
 ] as const;
@@ -39,5 +41,6 @@ export * from './types.ts';
 export * from './fallback.ts';
 export * from './nextjs.ts';
 export * from './nestjs.ts';
+export * from './express.ts';
 export * from './react.ts';
 

@@ -12,12 +12,12 @@
  */
 import { parseGitHubUrl, fetchRepositoryArchive, type FetchedRepository } from './github.ts';
 import {
-  findExistingAnalysis,
-  createPendingAnalysis,
+  findExistingAnalysisAdmin,
+  createPendingAnalysisAdmin,
   updateAnalysisStage,
   markAnalysisFailed,
   storeAnalysisResults,
-  getAnalysisById,
+  getAnalysisByIdAdmin,
   type PipelineStage,
   type AnalysisRecord,
 } from './storage.ts';
@@ -57,7 +57,7 @@ export async function runAnalysisPipeline(
 
   // 2. Check for existing analysis ("One analysis per repository")
   if (!options.forceRerun && !options.analysisId) {
-    const existing = await findExistingAnalysis(orgId, coords.canonicalUrl);
+    const existing = await findExistingAnalysisAdmin(orgId, coords.canonicalUrl);
     if (existing) {
       return {
         analysis: existing,
@@ -69,18 +69,17 @@ export async function runAnalysisPipeline(
   // 3. Create or reuse pending analysis record
   let analysis: AnalysisRecord;
   if (options.analysisId) {
-    const existing = await getAnalysisById(options.analysisId);
+    const existing = await getAnalysisByIdAdmin(options.analysisId, orgId);
     if (!existing) {
-      throw new Error(`Analysis ${options.analysisId} not found`);
+      throw new Error(`Analysis ${options.analysisId} not found for organization`);
     }
     analysis = existing;
   } else {
-    analysis = await createPendingAnalysis(
+    analysis = await createPendingAnalysisAdmin(
       orgId,
       coords.canonicalUrl,
       coords.repo,
-      coords.ref || 'main',
-      options.userId
+      coords.ref || 'main'
     );
   }
 
@@ -123,7 +122,8 @@ export async function runAnalysisPipeline(
       orgId,
       fetched.commitHash,
       parserResult,
-      insights
+      insights,
+      fetched.branch
     );
 
     notify('complete');
@@ -137,7 +137,11 @@ export async function runAnalysisPipeline(
     if (options.onStageChange) {
       options.onStageChange('failed', analysis.id);
     }
-    await markAnalysisFailed(analysis.id, orgId, failedStage, errorMessage);
+    try {
+      await markAnalysisFailed(analysis.id, orgId, failedStage, errorMessage);
+    } catch (markErr) {
+      console.error(`[CodoGraph Pipeline] Failed to persist error state for ${analysis.id}:`, markErr);
+    }
     throw err;
   } finally {
     // Always clean up extracted folder on disk

@@ -35,9 +35,11 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const dbUrl =
-  process.env.DATABASE_URL ||
-  'postgresql://postgres:gpsv%40280907sv@db.xiimblxgfdirkqhbekfn.supabase.co:5432/postgres';
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) {
+  console.error('[FATAL] DATABASE_URL environment variable is required to run direct PostgreSQL verification.');
+  process.exit(1);
+}
 
 const EIGHT_TABLES = [
   'projects',
@@ -259,8 +261,8 @@ async function runVerification() {
     [tempOrgId, anaId]
   );
   await client.query(
-    `insert into public.routes (org_id, analysis_id, method, pattern) values ($1, $2, 'GET', '/test');`,
-    [tempOrgId, anaId]
+    `insert into public.routes (org_id, analysis_id, file_id, method, pattern) values ($1, $2, $3, 'GET', '/test');`,
+    [tempOrgId, anaId, fileId]
   );
   await client.query(
     `insert into public.explanations (org_id, analysis_id, file_path, content, content_hash, model) values ($1, $2, 'a.ts', 'txt', 'h', 'm');`,

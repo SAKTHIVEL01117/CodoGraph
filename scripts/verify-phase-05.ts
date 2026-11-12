@@ -13,8 +13,9 @@
  *    requests and zero external dependencies.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import type { ParserResult } from '../lib/parser/types.ts';
+import { parseRepository } from '../lib/parser/index.ts';
 import { computeFoldedGraph } from '../lib/canvas/folding.ts';
 import {
   computeRepositorySummary,
@@ -35,29 +36,33 @@ function assert(condition: boolean, testName: string, detail?: string) {
   }
 }
 
+function writeFixtureFile(root: string, relPath: string, content: string) {
+  const full = path.join(root, relPath);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, content, 'utf8');
+}
+
 async function runAcceptanceChecks() {
   console.log('====================================================');
   console.log('CodoGraph Phase 5 Detail Pane Verification Suite');
   console.log('====================================================\n');
 
-  // Load preview scaffolding data
-  const dataPath = path.resolve(process.cwd(), 'data/preview-analysis.json');
-  assert(fs.existsSync(dataPath), 'Scaffolding data file exists at data/preview-analysis.json');
+  // Parse live local repository (no static scaffolding file)
+  const analysis = parseRepository(process.cwd());
+  const { files, edges, adapter, routes } = analysis;
 
-  const raw = fs.readFileSync(dataPath, 'utf-8');
-  const analysis = JSON.parse(raw) as ParserResult;
-  const { files, edges, adapter } = analysis;
-
-  console.log(`Loaded dataset: ${files.length} files, ${edges.length} edges, adapter: ${adapter}`);
+  console.log(
+    `Parsed local repository: ${files.length} files, ${edges.length} edges, ${routes.length} routes, adapter: ${adapter}`
+  );
 
   // --------------------------------------------------------------------------
   // Check 1: Resting State — Repository Summary
   // --------------------------------------------------------------------------
   console.log('\n--- Check 1: Repository Summary (Nothing Selected) ---');
-  const repoSummary = computeRepositorySummary('shadcn-ui/ui', adapter, files, edges);
+  const repoSummary = computeRepositorySummary('codograph', adapter, files, edges, routes);
 
   assert(
-    repoSummary.repositoryName === 'shadcn-ui/ui',
+    repoSummary.repositoryName === 'codograph',
     'Repository name correctly set in summary'
   );
 
@@ -77,8 +82,8 @@ async function runAcceptanceChecks() {
   );
 
   assert(
-    repoSummary.routesCount >= 0,
-    `Exact or absent convention: routesCount is ${repoSummary.routesCount}`
+    repoSummary.routesCount === routes.length && repoSummary.routesCount > 0,
+    `Exact Phase 8 route count reported: ${repoSummary.routesCount}`
   );
 
   assert(
@@ -97,6 +102,65 @@ async function runAcceptanceChecks() {
       repoSummary.readingStarts.every((f) => f.fanIn === 0),
     `Ranked list 2: Where reading starts contains ${repoSummary.readingStarts.length} zero-fanIn files`
   );
+
+  // Verify Phase 8 NestJS route count & framework detection on a deterministic local fixture
+  const nestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codograph-p5-nest-'));
+  try {
+    writeFixtureFile(
+      nestDir,
+      'package.json',
+      JSON.stringify({
+        name: 'nest-sample',
+        dependencies: { '@nestjs/core': '^10.0.0', '@nestjs/common': '^10.0.0' },
+      })
+    );
+    writeFixtureFile(
+      nestDir,
+      'src/orders/orders.controller.ts',
+      `import { Controller, Get, Post } from '@nestjs/common';
+       import { OrdersService } from './orders.service';
+       @Controller('orders')
+       export class OrdersController {
+         constructor(private readonly service: OrdersService) {}
+         @Get() list() { return this.service.list(); }
+         @Post(':id/confirm') confirm() { return true; }
+       }`
+    );
+    writeFixtureFile(
+      nestDir,
+      'src/orders/orders.service.ts',
+      'export class OrdersService { list() { return []; } }'
+    );
+    writeFixtureFile(
+      nestDir,
+      'src/orders/orders.module.ts',
+      'export class OrdersModule {}'
+    );
+
+    const nestResult = parseRepository(nestDir);
+    const nestSummary = computeRepositorySummary(
+      'nest-sample',
+      nestResult.adapter,
+      nestResult.files,
+      nestResult.edges,
+      nestResult.routes
+    );
+
+    assert(
+      nestSummary.frameworkDetected === 'NestJS',
+      `NestJS fixture formatted properly: ${nestSummary.frameworkDetected}`
+    );
+    assert(
+      nestSummary.routesCount === nestResult.routes.length && nestSummary.routesCount === 2,
+      `NestJS fixture extracted route count matches: ${nestSummary.routesCount} === 2`
+    );
+  } finally {
+    try {
+      fs.rmSync(nestDir, { recursive: true, force: true });
+    } catch {
+      // Ignore Windows cleanup locks
+    }
+  }
 
   // --------------------------------------------------------------------------
   // Check 2: Acceptance Check 3 — Exact Row Counts for Dependents & Dependencies
@@ -120,7 +184,6 @@ async function runAcceptanceChecks() {
     'Acceptance Check 3: Every file import and dependent count matches the exact number of rows listed underneath them'
   );
 
-  // Check top depended-on file: packages/cli/src/module_1.ts with fanIn 7
   const topFile = repoSummary.mostDependedOn[0];
   const topNeighbours = computeFileNeighbours(topFile.path, edges);
   console.log(`  Top file: ${topFile.path}`);

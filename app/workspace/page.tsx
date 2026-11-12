@@ -1,41 +1,70 @@
 /**
  * CodoGraph — Organization Workspace Dashboard (Phase 2 & Phase 7).
  *
- * Implements the workspace view matching the reference layout:
- * - Subheader: Organization name (from user credentials) + analyses count.
- * - Ingestion Form: Paste public GitHub repo URL and trigger pipeline.
- * - Monospace developer table with columns: Repository | State | Commit | Started | Finished.
- * - Multiline error diagnostic under failed state.
- * - Live real-time updates via Supabase Realtime broadcast on org:<orgId>.
- * - Stale run detection marking abandoned runs past 3 minutes old.
- * - Multi-tenant isolation verified by database RLS policies.
+ * Implements the multi-tenant workspace view over Supabase HTTPS + Clerk JWT RLS:
+ * - Resolves and syncs active Clerk organization via resolveOrgContext(true) + <OrgSync />.
+ * - Executes unfiltered query via createSupabaseServerClient() (RLS enforces tenant isolation).
+ * - Surfaces database/RLS errors loudly instead of masking them with seed data.
  */
 import React from 'react';
+import { redirect } from 'next/navigation';
+import { auth } from '@clerk/nextjs/server';
 import { resolveOrgContext } from '@/lib/auth/org-context';
+import { createSupabaseServerClient } from '@/lib/supabase/server';
 import { getAllAnalysesForOrg, type AnalysisRecord } from '@/lib/pipeline/storage';
+import { OrgSync } from '@/components/org-sync';
 import { WorkspaceDashboard } from '@/components/workspace-dashboard';
 
 export const dynamic = 'force-dynamic';
 
 export default async function WorkspacePage() {
-  const ctx = await resolveOrgContext(false);
-  const effectiveOrgId =
-    ctx.orgId ||
-    (process.env.NODE_ENV !== 'production' ? 'org_3Lm8dLnB8PvGRkr3BO5Wdz0g3Ot' : null);
+  const sessionAuth = await auth({ treatPendingAsSignedOut: false });
+  if (!sessionAuth.userId) {
+    redirect('/sign-in');
+  }
 
+  let orgId: string | null = sessionAuth.orgId ?? null;
+  let orgName: string | null = sessionAuth.orgSlug || null;
   let initialRecords: AnalysisRecord[] = [];
-  if (effectiveOrgId) {
+  let initialError: string | null = null;
+
+  try {
+    const ctx = await resolveOrgContext(true);
+    if (!ctx.isAuthenticated || !ctx.userId) {
+      redirect('/sign-in');
+    }
+    orgId = ctx.orgId;
+    orgName = ctx.orgName;
+  } catch (err) {
+    initialError =
+      err instanceof Error ? err.message : 'Failed to synchronize organization session.';
+    console.error('[CodoGraph Workspace] Organization resolution error:', err);
+  }
+
+  const sessionOrgId = sessionAuth.orgId ?? null;
+  const isOrgActivating = !sessionOrgId && Boolean(orgId);
+
+  if (sessionOrgId) {
     try {
-      initialRecords = await getAllAnalysesForOrg(effectiveOrgId);
-    } catch {
-      // Fallback handled in component
+      const supabase = await createSupabaseServerClient();
+      initialRecords = await getAllAnalysesForOrg(supabase);
+    } catch (err) {
+      initialError =
+        err instanceof Error ? err.message : 'Failed to load workspace analyses from Supabase.';
+      console.error('[CodoGraph Workspace] Error loading analyses:', err);
     }
   }
 
   return (
-    <WorkspaceDashboard
-      initialOrgId={effectiveOrgId}
-      initialRecords={initialRecords}
-    />
+    <>
+      <OrgSync activeOrgId={orgId} />
+      <WorkspaceDashboard
+        initialOrgId={orgId}
+        initialOrgName={orgName}
+        initialRecords={initialRecords}
+        initialError={initialError}
+        isOrgActivating={isOrgActivating}
+      />
+    </>
   );
 }

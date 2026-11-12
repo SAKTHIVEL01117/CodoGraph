@@ -20,7 +20,7 @@ import type { DiscoveredFile, ExtractedRoute } from '../types.ts';
 export const reactAdapter: FrameworkAdapter = {
   name: 'react',
 
-  detect(repositoryRoot: string, _files: DiscoveredFile[]): boolean {
+  detect(repositoryRoot: string): boolean {
     const pkgPath = path.join(repositoryRoot, 'package.json');
     if (fs.existsSync(pkgPath)) {
       try {
