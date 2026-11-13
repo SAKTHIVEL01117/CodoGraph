@@ -27,6 +27,7 @@ import {
   type TransitiveWalkResult,
 } from '@/lib/canvas/metrics';
 import { ExplanationRenderer } from './explanation-renderer';
+import { AskPanel } from './ask-panel';
 import {
   FileCode,
   Folder,
@@ -122,6 +123,7 @@ export function DetailPane({
   explanationCache,
   onCacheExplanation,
 }: DetailPaneProps) {
+  const [paneMode, setPaneMode] = useState<'overview' | 'ask'>('overview');
   const [isInsightsExpanded, setIsInsightsExpanded] = useState<boolean>(false);
 
   const fileMap = useMemo(() => {
@@ -329,8 +331,55 @@ export function DetailPane({
       className="w-80 shrink-0 h-full bg-card border-l border-border flex flex-col select-none z-10 font-mono text-foreground"
       aria-label="Detail Pane"
     >
-      {/* Top Context Header + Persistent Structure | Explanation Tabs */}
-      <div className="shrink-0 border-b border-border bg-card">
+      {/* Top Level Mode Tabs: Overview | Ask (Phase 12) */}
+      <div className="shrink-0 border-b border-border bg-secondary/30 px-3 py-1.5 flex items-center justify-between">
+        <div className="flex items-center gap-1 bg-muted/60 p-0.5 rounded-lg border border-border/50 text-xs font-sans">
+          <button
+            type="button"
+            onClick={() => setPaneMode('overview')}
+            className={`px-3 py-1 rounded-md font-medium text-xs transition-all cursor-pointer ${
+              paneMode === 'overview'
+                ? 'bg-card text-foreground shadow-xs font-semibold'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            onClick={() => setPaneMode('ask')}
+            className={`px-3 py-1 rounded-md font-medium text-xs transition-all cursor-pointer flex items-center gap-1.5 ${
+              paneMode === 'ask'
+                ? 'bg-card text-foreground shadow-xs font-semibold'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Sparkles className="w-3 h-3 text-primary shrink-0" />
+            <span>Ask</span>
+          </button>
+        </div>
+      </div>
+
+      {paneMode === 'ask' ? (
+        <div className="flex-1 min-h-0">
+          <AskPanel
+            analysisId={analysisId || ''}
+            repositoryName={repositoryName}
+            selectedFilePath={selectedFile ? selectedFile.path : null}
+            onSelectFile={(filePath) => {
+              const matched = files.find((f) => f.path === filePath);
+              if (matched) {
+                onSelect(matched.path);
+              } else {
+                onSelect(filePath);
+              }
+            }}
+          />
+        </div>
+      ) : (
+        <>
+          {/* Top Context Header + Persistent Structure | Explanation Tabs */}
+          <div className="shrink-0 border-b border-border bg-card">
         <div className="px-4 pt-3 pb-2">
           <div className="flex items-center justify-between gap-2 mb-0.5">
             <span className="text-[11px] font-sans text-muted-foreground">
@@ -1376,6 +1425,8 @@ export function DetailPane({
           </>
         )}
       </div>
-    </aside>
+    </>
+  )}
+</aside>
   );
 }

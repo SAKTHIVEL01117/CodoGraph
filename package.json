@@ -20,6 +20,10 @@
     "eval:paths": "node --experimental-strip-types scripts/eval-paths.ts",
     "eval:roles": "node --experimental-strip-types scripts/eval-roles.ts",
     "eval:prompts": "node --experimental-strip-types scripts/eval-prompts.ts",
+    "agent": "node codograph-agent/server.js",
+    "agent:start": "node codograph-agent/server.js",
+    "agent-key": "node --experimental-strip-types scripts/agent-key.ts",
+    "agent-check": "node --experimental-strip-types scripts/agent-check.ts",
     "start": "next start",
     "lint": "eslint"
   },

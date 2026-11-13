@@ -1,11 +1,13 @@
 {
-  "name": "my-first-agent",
+  "name": "codograph-agent",
   "version": "1.0.0",
-  "description": "Simple Deep Agent using LangChain and NVIDIA NIM API",
-  "main": "index.js",
+  "description": "Codebase Architecture Exploration Agent built on Deep Agents",
+  "main": "agent.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node server.js",
+    "cli": "node index.js",
+    "test": "node test-agent.js"
   },
   "dependencies": {
     "@langchain/core": "^1.4.0",
