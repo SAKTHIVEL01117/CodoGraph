@@ -63,3 +63,4 @@ After Netlify deploys:
 1. **Health Check**: Open `https://your-site-name.netlify.app/api/health` to confirm `{"status":"ok","service":"codograph"}`.
 2. **Landing Page**: Visit `https://your-site-name.netlify.app/` and paste a GitHub repository URL.
 3. **Workspace Canvas**: Log in via Clerk and explore the repository dependency graph.
+
