@@ -16,6 +16,9 @@ import { mintAgentCredential } from '@/lib/auth/agent-credential';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60;
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const AGENT_SERVICE_URL = process.env.AGENT_SERVICE_URL || 'http://127.0.0.1:4000';
 

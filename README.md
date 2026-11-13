@@ -49,18 +49,22 @@ pnpm agent
 
 ---
 
-## Hosting on Render
+## Deployment
 
-CodoGraph is ready to deploy directly to [Render](https://render.com).
+### Deploy to Vercel (Recommended for Web Application)
+CodoGraph is optimized for zero-config deployment on [Vercel](https://vercel.com):
+1. Import your repository into the Vercel Dashboard.
+2. Add your environment variables (Clerk, Supabase, NVIDIA NIM).
+3. Click **Deploy**.
 
-### 1-Click / Blueprint Deployment
-We provide a turnkey [`render.yaml`](render.yaml) specification:
+For complete instructions, see the [Vercel Deployment Guide](DEPLOYMENT_VERCEL.md).
+
+### Deploy to Render
+For all-in-one or multi-service deployment with Docker or native Node:
 1. Connect your repository to Render.
-2. Select **Blueprint** in the Render Dashboard.
-3. Provide your environment keys (Clerk, Supabase, NVIDIA NIM).
-4. Click **Apply**.
+2. Select **Blueprint** using [`render.yaml`](render.yaml) or create a Web Service.
 
-For complete step-by-step instructions, see the [Render Deployment Guide](DEPLOYMENT_RENDER.md).
+For complete instructions, see the [Render Deployment Guide](DEPLOYMENT_RENDER.md).
 
 ---
 

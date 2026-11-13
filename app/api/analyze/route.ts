@@ -20,7 +20,7 @@ import {
 } from '@/lib/pipeline/storage';
 import { runAnalysisPipeline } from '@/lib/pipeline/runner';
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
