@@ -125,6 +125,7 @@ export async function POST(
           messages,
           credential,
           selectedFile: body.selectedFile,
+          apiBaseUrl: process.env.CODOGRAPH_API_BASE_URL || req.nextUrl.origin,
         }),
       });
 

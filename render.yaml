@@ -1,0 +1,78 @@
+# ==============================================================================
+# CodoGraph — Render Infrastructure as Code (Blueprint)
+# https://render.com/docs/blueprint-spec
+# ==============================================================================
+# This blueprint defines the deployment configuration for CodoGraph on Render.
+# By default, it deploys CodoGraph as a unified, high-performance Web Service
+# running both Next.js and the CodoGraph Deep Agent service via scripts/render-start.mjs.
+# This fits within Render's Free tier (1 free web service) and eliminates inter-service latency.
+# ==============================================================================
+
+services:
+  - type: web
+    name: codograph
+    runtime: node
+    plan: free
+    region: oregon # Options: oregon, ohio, frankfurt, singapore
+    buildCommand: npm install -g pnpm && pnpm install --frozen-lockfile && cd codograph-agent && npm install && cd .. && pnpm build
+    startCommand: node scripts/render-start.mjs
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+
+      # ------------------------------------------------------------------------
+      # Clerk Authentication Keys
+      # ------------------------------------------------------------------------
+      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: NEXT_PUBLIC_CLERK_SIGN_IN_URL
+        value: /sign-in
+      - key: NEXT_PUBLIC_CLERK_SIGN_UP_URL
+        value: /sign-up
+      - key: NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL
+        value: /workspace
+      - key: NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL
+        value: /workspace
+
+      # ------------------------------------------------------------------------
+      # Supabase Database & Real-Time RLS Access
+      # ------------------------------------------------------------------------
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+
+      # ------------------------------------------------------------------------
+      # Agent HMAC Credential Signing Secret
+      # (Auto-generated cryptographically secure 256-bit string)
+      # ------------------------------------------------------------------------
+      - key: AGENT_CREDENTIAL_SECRET
+        generateValue: true
+
+      # ------------------------------------------------------------------------
+      # NVIDIA NIM AI Model API (for Agent Reasoning)
+      # ------------------------------------------------------------------------
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: NVIDIA_MODEL
+        value: meta/llama-3.3-70b-instruct
+
+      # ------------------------------------------------------------------------
+      # LangSmith Tracing & Observability (Optional)
+      # ------------------------------------------------------------------------
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: codograph-production
+      - key: LANGSMITH_API_KEY
+        sync: false
+

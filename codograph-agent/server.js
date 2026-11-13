@@ -73,9 +73,14 @@ const server = http.createServer(async (req, res) => {
         const rawMessages = body.messages || [];
         const credential = body.credential || req.headers['x-agent-credential'] || '';
         const selectedFile = body.selectedFile;
+        const apiBaseUrl = body.apiBaseUrl;
 
         if (credential) {
           process.env.CODOGRAPH_AGENT_CREDENTIAL = credential;
+        }
+
+        if (apiBaseUrl && !process.env.CODOGRAPH_API_BASE_URL) {
+          process.env.CODOGRAPH_API_BASE_URL = apiBaseUrl;
         }
 
         if (rawMessages.length === 0) {
@@ -153,6 +158,8 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Not found' }));
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`🤖 CodoGraph Deep Agent Service running on http://127.0.0.1:${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+
+server.listen(PORT, HOST, () => {
+  console.log(`🤖 CodoGraph Deep Agent Service running on http://${HOST}:${PORT}`);
 });

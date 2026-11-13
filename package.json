@@ -20,12 +20,17 @@
     "eval:paths": "node --experimental-strip-types scripts/eval-paths.ts",
     "eval:roles": "node --experimental-strip-types scripts/eval-roles.ts",
     "eval:prompts": "node --experimental-strip-types scripts/eval-prompts.ts",
-    "agent": "node codograph-agent/server.js",
-    "agent:start": "node codograph-agent/server.js",
+    "agent": "node --experimental-strip-types codograph-agent/server.js",
+    "agent:start": "node --experimental-strip-types codograph-agent/server.js",
     "agent-key": "node --experimental-strip-types scripts/agent-key.ts",
     "agent-check": "node --experimental-strip-types scripts/agent-check.ts",
+    "build:render": "cd codograph-agent && npm install && cd .. && pnpm build",
+    "start:render": "node scripts/render-start.mjs",
     "start": "next start",
     "lint": "eslint"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
