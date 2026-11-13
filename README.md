@@ -51,7 +51,15 @@ pnpm agent
 
 ## Deployment
 
-### Deploy to Vercel (Recommended for Web Application)
+### Deploy to Netlify
+CodoGraph is ready for deployment on [Netlify](https://netlify.com):
+1. Import your repository into the Netlify Dashboard.
+2. Add your environment variables (Clerk, Supabase, NVIDIA NIM).
+3. Click **Deploy**.
+
+For complete instructions, see the [Netlify Deployment Guide](DEPLOYMENT_NETLIFY.md).
+
+### Deploy to Vercel
 CodoGraph is optimized for zero-config deployment on [Vercel](https://vercel.com):
 1. Import your repository into the Vercel Dashboard.
 2. Add your environment variables (Clerk, Supabase, NVIDIA NIM).

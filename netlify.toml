@@ -1,0 +1,14 @@
+# ==============================================================================
+# CodoGraph — Netlify Production Configuration
+# ==============================================================================
+
+[build]
+  command = "pnpm build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  PNPM_FLAGS = "--no-frozen-lockfile"
+
+[functions]
+  node_bundler = "esbuild"

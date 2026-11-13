@@ -70,5 +70,10 @@
     "typescript": "^5",
     "vite": "^8.3.6"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@clerk/shared"
+    ]
+  },
   "packageManager": "pnpm@12.16.1"
 }

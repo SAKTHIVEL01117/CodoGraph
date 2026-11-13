@@ -1,6 +1,10 @@
-onlyBuiltDependencies:
-  - '@clerk/shared'
+packages:
+  - '.'
 
 allowBuilds:
+  '@clerk/shared': true
   sharp: false
   unrs-resolver: false
+
+onlyBuiltDependencies:
+  - '@clerk/shared'
