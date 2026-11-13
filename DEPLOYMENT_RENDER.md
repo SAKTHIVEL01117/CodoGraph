@@ -59,7 +59,7 @@ If you prefer setting up via the Render Web UI manually:
    - **Branch**: `main`
    - **Build Command**:
      ```bash
-     npm install -g pnpm && pnpm install --frozen-lockfile && cd codograph-agent && npm install && cd .. && pnpm build
+     npm install -g pnpm && pnpm install && cd codograph-agent && npm install && cd .. && pnpm build
      ```
    - **Start Command**:
      ```bash

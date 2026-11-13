@@ -14,7 +14,7 @@ services:
     runtime: node
     plan: free
     region: oregon # Options: oregon, ohio, frankfurt, singapore
-    buildCommand: npm install -g pnpm && pnpm install --frozen-lockfile && cd codograph-agent && npm install && cd .. && pnpm build
+    buildCommand: npm install -g pnpm && pnpm install && cd codograph-agent && npm install && cd .. && pnpm build
     startCommand: node scripts/render-start.mjs
     healthCheckPath: /api/health
     envVars:
