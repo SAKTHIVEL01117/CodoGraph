@@ -16,7 +16,7 @@
  *   - Folder selected: Breakdown and file list.
  * - Zero network requests; bidirectional hover & selection.
  */
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { ParsedFile, ParsedEdge, ExtractedRoute } from '@/lib/parser/types';
 import type { FoldedNode } from '@/lib/canvas/folding';
 import {
@@ -26,6 +26,7 @@ import {
   computeCodebaseInsights,
   type TransitiveWalkResult,
 } from '@/lib/canvas/metrics';
+import { ExplanationRenderer } from './explanation-renderer';
 import {
   FileCode,
   Folder,
@@ -41,6 +42,10 @@ import {
   ChevronRight,
   RefreshCw,
   Lightbulb,
+  Sparkles,
+  AlertCircle,
+  Loader2,
+  Bot,
 } from 'lucide-react';
 
 function renderSplitPath(fullPath: string): React.ReactNode {
@@ -56,6 +61,18 @@ function renderSplitPath(fullPath: string): React.ReactNode {
       <span className="font-semibold text-foreground">{tail}</span>
     </>
   );
+}
+
+export interface CachedExplanationData {
+  id?: string;
+  content: string;
+  cached: boolean;
+  tokens: number;
+  model: string;
+  contentHash: string;
+  isFolder: boolean;
+  isStale?: boolean;
+  stalenessReason?: string | null;
 }
 
 export interface DetailPaneProps {
@@ -75,6 +92,11 @@ export interface DetailPaneProps {
   onHover: (id: string | null) => void;
   onWalkTypeChange: (type: 'blast_radius' | 'dependency_chain' | null) => void;
   onOpenRoutesTab?: () => void;
+  analysisId?: string;
+  commitHash?: string | null;
+  onRoleUpdate?: (filePath: string, newRole: string) => void;
+  explanationCache?: Map<string, CachedExplanationData>;
+  onCacheExplanation?: (id: string, data: CachedExplanationData) => void;
 }
 
 export function DetailPane({
@@ -94,6 +116,11 @@ export function DetailPane({
   onHover,
   onWalkTypeChange,
   onOpenRoutesTab,
+  analysisId,
+  commitHash,
+  onRoleUpdate,
+  explanationCache,
+  onCacheExplanation,
 }: DetailPaneProps) {
   const [isInsightsExpanded, setIsInsightsExpanded] = useState<boolean>(false);
 
@@ -108,6 +135,132 @@ export function DetailPane({
   const selectedFile = selectedId ? fileMap.get(selectedId) || null : null;
   const selectedNode =
     selectedId && !selectedFile ? nodeMap.get(selectedId) || null : null;
+
+  // Set of all known paths (files and folders) for clickable path links
+  const allKnownPaths = useMemo(() => {
+    const set = new Set<string>();
+    files.forEach((f) => {
+      set.add(f.path);
+      if (f.folder) set.add(f.folder);
+    });
+    nodes.forEach((n) => set.add(n.id));
+    return set;
+  }, [files, nodes]);
+
+  // Local cache fallback if not passed from CanvasShell
+  const [localExplanationCache, setLocalExplanationCache] = useState<
+    Map<string, CachedExplanationData>
+  >(new Map());
+
+  const activeExplanationCache = explanationCache ?? localExplanationCache;
+
+  const [isLoadingExplanation, setIsLoadingExplanation] = useState<boolean>(false);
+  const [explanationError, setExplanationError] = useState<string | null>(null);
+  const [tracingStatus, setTracingStatus] = useState<{
+    enabled: boolean;
+    project: string;
+    endpoint?: string;
+  } | null>(null);
+
+  // Fetch initial tracing status & existing explanations on load
+  useEffect(() => {
+    if (!analysisId) return;
+    let isMounted = true;
+
+    fetch(`/api/analyses/${analysisId}/explain`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (!isMounted) return;
+        if (data.tracingStatus) {
+          setTracingStatus(data.tracingStatus);
+        }
+        if (Array.isArray(data.explanations)) {
+          for (const exp of data.explanations) {
+            const entry: CachedExplanationData = {
+              id: exp.id,
+              content: exp.content,
+              cached: true,
+              tokens: 0,
+              model: exp.model,
+              contentHash: exp.content_hash,
+              isFolder: exp.is_folder,
+            };
+            if (onCacheExplanation) {
+              onCacheExplanation(exp.file_path, entry);
+            } else {
+              setLocalExplanationCache((prev) => new Map(prev).set(exp.file_path, entry));
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed loading explanations:', err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [analysisId, onCacheExplanation]);
+
+  const handleExplain = async (forceRefresh = false) => {
+    if (!analysisId || !selectedId) return;
+
+    const isFolder = !selectedFile && Boolean(selectedNode);
+    const targetPath = selectedFile ? selectedFile.path : selectedNode ? selectedNode.id : null;
+    if (!targetPath) return;
+
+    setIsLoadingExplanation(true);
+    setExplanationError(null);
+
+    try {
+      const res = await fetch(`/api/analyses/${analysisId}/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetPath,
+          isFolder,
+          forceRefresh,
+          latestRepoCommit: commitHash,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed generating explanation');
+      }
+
+      const explanationEntry: CachedExplanationData = {
+        id: data.explanation.id,
+        content: data.explanation.content,
+        cached: data.explanation.cached,
+        tokens: data.explanation.tokens,
+        model: data.explanation.model,
+        contentHash: data.explanation.contentHash,
+        isFolder: data.explanation.isFolder,
+        isStale: data.isStale,
+        stalenessReason: data.stalenessReason,
+      };
+
+      if (onCacheExplanation) {
+        onCacheExplanation(targetPath, explanationEntry);
+      } else {
+        setLocalExplanationCache((prev) => new Map(prev).set(targetPath, explanationEntry));
+      }
+
+      if (data.tracingStatus) {
+        setTracingStatus(data.tracingStatus);
+      }
+
+      // If a non-structural role was classified for this file, propagate to parent
+      if (data.role && onRoleUpdate) {
+        onRoleUpdate(targetPath, data.role);
+      }
+    } catch (err) {
+      setExplanationError(err instanceof Error ? err.message : 'Error generating explanation');
+    } finally {
+      setIsLoadingExplanation(false);
+    }
+  };
 
   const hoveredPathsSet = useMemo(() => {
     const set = new Set<string>();
@@ -234,14 +387,252 @@ export function DetailPane({
       {/* Pane Scrollable Body */}
       <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-border/60">
         {activeTab === 'explanation' ? (
-          /* Tab: Explanation (Empty State until AI layer) */
-          <div className="p-4 space-y-1.5 font-sans">
-            <p className="text-xs font-semibold text-foreground">
-              No explanation yet.
-            </p>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              Explanations come from a model call, and nothing makes one yet.
-            </p>
+          /* Tab: Explanation (Phase 10 Engine) */
+          <div className="p-4 space-y-4 font-sans text-xs">
+            {selectedFile ? (
+              /* File Explanation */
+              (() => {
+                const cached = activeExplanationCache.get(selectedFile.path);
+
+                return (
+                  <div className="space-y-3">
+                    {/* Header with Role & Action */}
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-border/60">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <FileCode className="w-3.5 h-3.5 text-primary shrink-0" />
+                        <span className="font-semibold text-foreground truncate max-w-[160px]">
+                          {selectedFile.path.split('/').pop()}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-secondary border border-border text-muted-foreground uppercase shrink-0">
+                          {selectedFile.role && selectedFile.role !== 'module'
+                            ? selectedFile.role
+                            : 'file'}
+                        </span>
+                      </div>
+
+                      {cached && (
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(true)}
+                          disabled={isLoadingExplanation}
+                          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+                          title="Re-run explanation with model call"
+                        >
+                          <RefreshCw
+                            className={`w-3 h-3 ${isLoadingExplanation ? 'animate-spin' : ''}`}
+                          />
+                          <span>Re-explain</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Error Message */}
+                    {explanationError && (
+                      <div className="p-2.5 rounded bg-destructive/10 border border-destructive/20 text-destructive text-[11px] leading-snug">
+                        {explanationError}
+                      </div>
+                    )}
+
+                    {/* Staleness Warning */}
+                    {cached?.isStale && (
+                      <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 space-y-1.5">
+                        <div className="flex items-center gap-1.5 font-semibold">
+                          <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                          <span>Explanation is stale</span>
+                        </div>
+                        <p className="leading-snug text-muted-foreground text-[10px]">
+                          {cached.stalenessReason ||
+                            'File or repository has changed since this explanation was generated.'}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(true)}
+                          disabled={isLoadingExplanation}
+                          className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-200 font-medium text-[10px] transition-colors cursor-pointer"
+                        >
+                          Re-analyse
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Main Content Area */}
+                    {isLoadingExplanation ? (
+                      <div className="py-8 flex flex-col items-center justify-center text-muted-foreground space-y-2">
+                        <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                        <span className="text-xs">Tracing explanation with model...</span>
+                      </div>
+                    ) : cached ? (
+                      <div className="space-y-3">
+                        <ExplanationRenderer
+                          content={cached.content}
+                          knownPaths={allKnownPaths}
+                          onSelect={onSelect}
+                        />
+
+                        {/* Meta details: Tokens / Cache status */}
+                        <div className="pt-2 text-[10px] text-muted-foreground flex items-center justify-between border-t border-border/40 font-mono">
+                          <span>
+                            {cached.cached ? '0 tokens (cached)' : `${cached.tokens} tokens`}
+                          </span>
+                          <span className="truncate max-w-[120px]">
+                            {cached.model.split('/').pop()}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      /* Not yet explained state */
+                      <div className="py-4 space-y-3">
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Generate an architectural explanation for this file based on its real
+                          neighbours: imports ({fileNeighbours?.dependencies.length ?? 0}) and
+                          incoming dependents ({fileNeighbours?.dependents.length ?? 0}).
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(false)}
+                          disabled={isLoadingExplanation}
+                          className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded bg-primary text-primary-foreground font-medium text-xs hover:bg-primary/90 transition-colors cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Explain File</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            ) : selectedNode ? (
+              /* Folder Explanation */
+              (() => {
+                const cached = activeExplanationCache.get(selectedNode.id);
+
+                return (
+                  <div className="space-y-3">
+                    {/* Header */}
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-border/60">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <Folder className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                        <span className="font-semibold text-foreground truncate max-w-[160px]">
+                          {selectedNode.id}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-secondary border border-border text-muted-foreground uppercase shrink-0">
+                          folder
+                        </span>
+                      </div>
+
+                      {cached && (
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(true)}
+                          disabled={isLoadingExplanation}
+                          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer disabled:opacity-50 shrink-0"
+                          title="Re-run folder explanation"
+                        >
+                          <RefreshCw
+                            className={`w-3 h-3 ${isLoadingExplanation ? 'animate-spin' : ''}`}
+                          />
+                          <span>Re-explain</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {explanationError && (
+                      <div className="p-2.5 rounded bg-destructive/10 border border-destructive/20 text-destructive text-[11px] leading-snug">
+                        {explanationError}
+                      </div>
+                    )}
+
+                    {cached?.isStale && (
+                      <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-700 dark:text-amber-300 space-y-1.5">
+                        <div className="flex items-center gap-1.5 font-semibold">
+                          <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                          <span>Folder contents modified</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(true)}
+                          disabled={isLoadingExplanation}
+                          className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-800 dark:text-amber-200 font-medium text-[10px] transition-colors cursor-pointer"
+                        >
+                          Re-analyse
+                        </button>
+                      </div>
+                    )}
+
+                    {isLoadingExplanation ? (
+                      <div className="py-8 flex flex-col items-center justify-center text-muted-foreground space-y-2">
+                        <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                        <span className="text-xs">Tracing folder explanation...</span>
+                      </div>
+                    ) : cached ? (
+                      <div className="space-y-3">
+                        <ExplanationRenderer
+                          content={cached.content}
+                          knownPaths={allKnownPaths}
+                          onSelect={onSelect}
+                        />
+                        <div className="pt-2 text-[10px] text-muted-foreground flex items-center justify-between border-t border-border/40 font-mono">
+                          <span>
+                            {cached.cached ? '0 tokens (cached)' : `${cached.tokens} tokens`}
+                          </span>
+                          <span className="truncate max-w-[120px]">
+                            {cached.model.split('/').pop()}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-4 space-y-3">
+                        <p className="text-xs text-muted-foreground leading-relaxed">
+                          Explain what responsibility this directory owns, its{' '}
+                          {selectedNode.files.length} indexed files, and why external parts of the
+                          codebase depend on it (fanIn: {selectedNode.fanIn}).
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => handleExplain(false)}
+                          disabled={isLoadingExplanation}
+                          className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded bg-primary text-primary-foreground font-medium text-xs hover:bg-primary/90 transition-colors cursor-pointer"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          <span>Explain Folder</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
+            ) : (
+              /* No file or folder selected */
+              <div className="py-8 text-center space-y-2 text-muted-foreground">
+                <Bot className="w-6 h-6 mx-auto text-muted-foreground/60" />
+                <p className="font-medium text-foreground text-xs">No target selected</p>
+                <p className="text-xs max-w-[220px] mx-auto leading-relaxed">
+                  Select a file or folder on the canvas map to explain its architectural purpose.
+                </p>
+              </div>
+            )}
+
+            {/* Footer: Tracing Status Visibility */}
+            <div className="pt-4 border-t border-border/50 flex items-center justify-between text-[11px] text-muted-foreground">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    tracingStatus?.enabled
+                      ? 'bg-emerald-500 animate-pulse'
+                      : 'bg-muted-foreground/40'
+                  }`}
+                />
+                <span>
+                  {tracingStatus?.enabled
+                    ? `LangSmith: ${tracingStatus.project}`
+                    : 'Tracing: Off'}
+                </span>
+              </div>
+              <span className="font-mono text-[10px] text-muted-foreground/75 truncate max-w-[120px]">
+                {activeExplanationCache.get(selectedId || '')?.model?.split('/').pop() ||
+                  'NIM'}
+              </span>
+            </div>
           </div>
         ) : selectedFile && fileNeighbours ? (
           /* Tab: Structure — File Selected */

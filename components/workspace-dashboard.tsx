@@ -482,6 +482,15 @@ export function WorkspaceDashboard({
           />
 
           <Link
+            href="/evals"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border bg-secondary/40 hover:bg-secondary hover:border-primary/40 text-xs font-jetbrains text-muted-foreground hover:text-foreground transition-colors"
+            title="Model evaluation benchmark, hallucination checks, and prompt versions"
+          >
+            <Activity className="w-3.5 h-3.5 text-primary" />
+            <span className="hidden sm:inline">Evals</span>
+          </Link>
+
+          <Link
             href="/team"
             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-border bg-secondary/40 hover:bg-secondary hover:border-primary/40 text-xs font-jetbrains text-muted-foreground hover:text-foreground transition-colors"
             title="Manage team members and invitations"

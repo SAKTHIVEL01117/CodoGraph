@@ -912,3 +912,178 @@ export async function storeAnalysisResults(
 
   return finalRow as AnalysisRecord;
 }
+
+// =============================================================================
+// 3. PHASE 10: EXPLANATIONS & MODEL FILE ROLES (Clerk RLS & Admin HTTPS)
+// =============================================================================
+
+export interface ExplanationRecord {
+  id: string;
+  org_id?: string;
+  analysis_id: string;
+  file_path: string;
+  is_folder: boolean;
+  content: string;
+  content_hash: string;
+  model: string;
+  created_at: string;
+}
+
+/**
+ * Reads a cached explanation for a specific file or folder under RLS.
+ * Keyed on content_hash and pinned model version.
+ */
+export async function getCachedExplanation(
+  supabase: SupabaseClient,
+  analysisId: string,
+  filePath: string,
+  contentHash: string,
+  model: string,
+  isFolder = false
+): Promise<ExplanationRecord | null> {
+  const { data, error } = await supabase
+    .from('explanations')
+    .select('id, org_id, analysis_id, file_path, is_folder, content, content_hash, model, created_at')
+    .eq('analysis_id', analysisId)
+    .eq('file_path', filePath)
+    .eq('content_hash', contentHash)
+    .eq('model', model)
+    .eq('is_folder', isFolder)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`[CodoGraph Storage] Failed reading explanation cache: ${error.message}`);
+  }
+
+  return (data as ExplanationRecord | null) ?? null;
+}
+
+/**
+ * Returns the most recent explanation for a file or folder regardless of hash,
+ * used to detect staleness when the file content has changed.
+ */
+export async function getLatestExplanation(
+  supabase: SupabaseClient,
+  analysisId: string,
+  filePath: string,
+  isFolder = false
+): Promise<ExplanationRecord | null> {
+  const { data, error } = await supabase
+    .from('explanations')
+    .select('id, org_id, analysis_id, file_path, is_folder, content, content_hash, model, created_at')
+    .eq('analysis_id', analysisId)
+    .eq('file_path', filePath)
+    .eq('is_folder', isFolder)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`[CodoGraph Storage] Failed reading latest explanation: ${error.message}`);
+  }
+
+  return (data as ExplanationRecord | null) ?? null;
+}
+
+/**
+ * Reads all cached explanations for an analysis under RLS.
+ */
+export async function getAllExplanationsForAnalysis(
+  supabase: SupabaseClient,
+  analysisId: string
+): Promise<ExplanationRecord[]> {
+  const { data, error } = await supabase
+    .from('explanations')
+    .select('id, org_id, analysis_id, file_path, is_folder, content, content_hash, model, created_at')
+    .eq('analysis_id', analysisId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(`[CodoGraph Storage] Failed reading explanations: ${error.message}`);
+  }
+
+  return (data as ExplanationRecord[]) ?? [];
+}
+
+/**
+ * Persists an explanation into the database under RLS.
+ */
+export async function storeExplanation(
+  supabase: SupabaseClient,
+  orgId: string,
+  analysisId: string,
+  filePath: string,
+  isFolder: boolean,
+  content: string,
+  contentHash: string,
+  model: string
+): Promise<ExplanationRecord> {
+  const { data, error } = await supabase
+    .from('explanations')
+    .insert({
+      org_id: orgId,
+      analysis_id: analysisId,
+      file_path: filePath,
+      is_folder: isFolder,
+      content,
+      content_hash: contentHash,
+      model,
+    })
+    .select('id, org_id, analysis_id, file_path, is_folder, content, content_hash, model, created_at')
+    .single();
+
+  if (error || !data) {
+    throw new Error(`[CodoGraph Storage] Failed inserting explanation: ${error?.message || 'Unknown error'}`);
+  }
+
+  return data as ExplanationRecord;
+}
+
+/**
+ * Assigns an AI-classified non-structural role to a file in file_roles and updates files table.
+ */
+export async function updateModelFileRole(
+  supabase: SupabaseClient,
+  orgId: string,
+  analysisId: string,
+  filePath: string,
+  role: string
+): Promise<void> {
+  // 1. Find file ID
+  const { data: fileRow } = await supabase
+    .from('files')
+    .select('id')
+    .eq('analysis_id', analysisId)
+    .eq('path', filePath)
+    .maybeSingle();
+
+  // 2. Insert into file_roles
+  const { error: roleErr } = await supabase.from('file_roles').insert({
+    org_id: orgId,
+    analysis_id: analysisId,
+    file_id: fileRow?.id || null,
+    file_path: filePath,
+    role,
+    source: 'model',
+    confidence: 1.0,
+  });
+
+  if (roleErr) {
+    console.warn(`[CodoGraph Storage] Failed logging model file_role: ${roleErr.message}`);
+  }
+
+  // 3. Update files table role
+  if (fileRow?.id) {
+    const { error: fileErr } = await supabase
+      .from('files')
+      .update({ role })
+      .eq('id', fileRow.id);
+
+    if (fileErr) {
+      console.warn(`[CodoGraph Storage] Failed updating file row role: ${fileErr.message}`);
+    }
+  }
+}
+

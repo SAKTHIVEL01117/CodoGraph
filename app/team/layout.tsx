@@ -2,7 +2,7 @@ import React from 'react';
 import Link from 'next/link';
 import { OrganizationSwitcher, UserButton } from '@clerk/nextjs';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { Users, LayoutDashboard } from 'lucide-react';
+import { Users, LayoutDashboard, Activity } from 'lucide-react';
 
 export default function TeamLayout({
   children,
@@ -63,6 +63,13 @@ export default function TeamLayout({
             >
               <LayoutDashboard className="w-3.5 h-3.5" />
               <span>Workspace</span>
+            </Link>
+            <Link
+              href="/evals"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-jetbrains text-muted-foreground hover:text-foreground hover:bg-secondary transition-all"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Evals</span>
             </Link>
             <Link
               href="/team"

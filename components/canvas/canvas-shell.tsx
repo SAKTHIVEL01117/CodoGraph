@@ -25,7 +25,7 @@ import { computeFoldedGraph } from '@/lib/canvas/folding';
 import { computeTransitiveWalk, type TransitiveWalkResult } from '@/lib/canvas/metrics';
 import { LeftRail } from './left-rail';
 import { CanvasArea } from './canvas-area';
-import { DetailPane } from './detail-pane';
+import { DetailPane, type CachedExplanationData } from './detail-pane';
 import { ThemeToggle } from '@/components/theme-toggle';
 import {
   X,
@@ -118,6 +118,29 @@ export function CanvasShell({
 
   const activeResult: ParserResult = currentAnalysis.result || primaryAnalysis;
 
+  // Phase 10: Persistent explanation cache & dynamic model role assignments
+  const [explanationCache, setExplanationCache] = useState<
+    Map<string, CachedExplanationData>
+  >(new Map());
+
+  const handleCacheExplanation = (id: string, data: CachedExplanationData) => {
+    setExplanationCache((prev) => new Map(prev).set(id, data));
+  };
+
+  const [roleOverrides, setRoleOverrides] = useState<Map<string, string>>(new Map());
+
+  const handleRoleUpdate = (filePath: string, newRole: string) => {
+    setRoleOverrides((prev) => new Map(prev).set(filePath, newRole));
+  };
+
+  const mergedFiles = useMemo(() => {
+    if (roleOverrides.size === 0) return activeResult.files;
+    return activeResult.files.map((f) => {
+      const override = roleOverrides.get(f.path);
+      return override ? { ...f, role: override } : f;
+    });
+  }, [activeResult.files, roleOverrides]);
+
   const sortedRoutes = useMemo(() => {
     return [...(activeResult.routes || [])].sort(
       (a, b) =>
@@ -133,7 +156,7 @@ export function CanvasShell({
   const totalImportsToResolve =
     (coverage?.importsResolvedInternal ?? 0) + (coverage?.importsUnresolved ?? 0);
   const computedRatio =
-    coverage && coverage.filesFound > 0 && activeResult.files.length === 0
+    coverage && coverage.filesFound > 0 && mergedFiles.length === 0
       ? 0
       : totalImportsToResolve > 0
         ? Number((((coverage?.importsResolvedInternal ?? 0) / totalImportsToResolve) * 100).toFixed(1))
@@ -143,26 +166,26 @@ export function CanvasShell({
 
   const isPartial =
     coverageRatio < 95 ||
-    (activeResult.files.length === 0 && (coverage?.filesFound ?? 0) > 0);
+    (mergedFiles.length === 0 && (coverage?.filesFound ?? 0) > 0);
 
   // Pure derivation of categories for left rail (reshaped per framework adapter)
   const categories = useMemo(() => {
-    return categorizeFiles(activeResult.files, activeResult.adapter);
-  }, [activeResult.files, activeResult.adapter]);
+    return categorizeFiles(mergedFiles, activeResult.adapter);
+  }, [mergedFiles, activeResult.adapter]);
 
   // Pure computation of folded graph
   const foldedGraph = useMemo(() => {
     return computeFoldedGraph(
-      activeResult.files,
+      mergedFiles,
       activeResult.edges,
       openNodeIds
     );
-  }, [activeResult.files, activeResult.edges, openNodeIds]);
+  }, [mergedFiles, activeResult.edges, openNodeIds]);
 
   const selectedFile = useMemo(() => {
     if (!selectedId) return null;
-    return activeResult.files.find((f) => f.path === selectedId) || null;
-  }, [selectedId, activeResult.files]);
+    return mergedFiles.find((f) => f.path === selectedId) || null;
+  }, [selectedId, mergedFiles]);
 
   const walkResult: TransitiveWalkResult | null = useMemo(() => {
     if (!selectedFile || !activeWalkType) return null;
@@ -678,9 +701,11 @@ export function CanvasShell({
 
         {/* Column 3: Right Detail Pane */}
         <DetailPane
+          analysisId={currentAnalysis.id}
+          commitHash={currentAnalysis.commit}
           repositoryName={currentAnalysis.repository}
           adapter={activeResult.adapter}
-          files={activeResult.files}
+          files={mergedFiles}
           edges={activeResult.edges}
           nodes={foldedGraph.nodes}
           routes={sortedRoutes}
@@ -694,6 +719,9 @@ export function CanvasShell({
           onHover={setHoveredId}
           onWalkTypeChange={setActiveWalkType}
           onOpenRoutesTab={() => setCenterTab('routes')}
+          explanationCache={explanationCache}
+          onCacheExplanation={handleCacheExplanation}
+          onRoleUpdate={handleRoleUpdate}
         />
       </div>
     </div>
